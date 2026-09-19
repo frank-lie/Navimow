@@ -5,6 +5,7 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.2.2 - 18.09.2026 documentation
 # v0.2.1 - 18.09.2026 extended logging & readingsUpdate
 # v0.2.0 - 15.09.2026 seperate iomaster and devices
 # v0.1.0 - 14.09.2026 mqtt support
@@ -30,7 +31,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.2.1 - 18.09.2026';
+my $Navimow_version = 'v0.2.2 - 18.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -426,7 +427,7 @@ sub Navimow_Request($;$$$)
 		Log3($name, 4, "$name (Request): Requesting for available devices first.");
 		
 	## second get mqtt-credentials once	
-	} elsif (!defined($hash->{MQTTCREDENTIALS}) {
+	} elsif (!defined($hash->{MQTTCREDENTIALS})) {
 		$hash->{MQTTCREDENTIALS} = 1;
 		$method = 'GET';
 		$path = '/openapi/mqtt/userInfo/get/v2';
@@ -497,7 +498,7 @@ sub Navimow_Get($$@)
 		
 	## get for mow units
 	} else {
-		if ( lc($cmd) eq 'forceupdate') {
+		if ( lc($cmd) eq 'devicestatus') {
 			return Navimow_Request($hash);	
 		} else {
 			$setlist='devicestatus:noArg';
@@ -520,11 +521,11 @@ sub Navimow_Attr($$$;$)
 			if ( $cmd eq 'del' || $attrVal == 0) {
 				$hash->{INTERVAL} = 0;
 				Navimow_Polltimer($hash);
-			} elsif ( $attrVal >= 10 ) {
+			} elsif ( $attrVal >= 60 ) {
 				$hash->{INTERVAL} = $attrVal;
 				Navimow_Polltimer($hash, 1);
-			} else { ## if interval < 10
-				return "Minimum polling interval is 10 seconds.";
+			} else { ## if interval < 60
+				return "Minimum polling interval is 60 seconds.";
 			}
 		## save jsonRawData in a reading
 		} elsif ( $attrName eq 'saveRawData' ) {
@@ -667,6 +668,8 @@ sub Navimow_MQTT_Connect($)
 		
 	my $host = ReadingsVal($name, '._data_mqttHost', '');
 	my $path = ReadingsVal($name, '._data_mqttUrl', ''); 
+	
+	readingsSingleUpdate($hash, 'mqtt_connect', 'no mqtt-credentials', 1) if (!$host || !$path );
 	
 	if (!$init_done || !$host || !$path ) {
 		InternalTimer(gettimeofday()+30, 'Navimow_MQTT_Connect', $hash, 0);
@@ -896,3 +899,378 @@ sub Navimow_MQTT_Keepalive($)
 
 
 1;
+
+=pod
+=item device
+=item summary    controls daikin airconditioning units over cloud access 
+=item summary_DE steuert Daikin Klimaanlagen mit Cloud-Zugriff
+=begin html
+
+<a id="Navimow"></a>
+<h3>Navimow</h3>
+<ul>
+  This module can receive data from Navimow-Mower over the Segway-cloud. It can 
+  also send simple commands.
+  <br><br>
+  <a id="DaikinCloud-define"></a>
+  <b>Define</b>
+  <ul>
+    <ul>
+      <br>
+      First a master device (bridge) has to be defined to handle the access  
+      to thecloud:<br><br>
+      <b><u>Definition of the master device</u></b><br><br>
+      <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow</code><br>
+	  or with individuel config-parameters:
+	  <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow &lt;CLIENT_ID&gt; 
+      &lt;CLIENT_SECRET&gt; &lt;REDIRECT_URI&gt;</code><br>
+      <br>
+	  CLIENT_ID und CLIENT_SECRET are actually adopted from home-assistant.
+	  <br>
+      <br>
+      Of course you can also define an individual REDIRECT_URI by the following scheme:
+      <br><br>
+      https://&lt;IP FHEM&gt;:8083/fhem?cmd.Test=set%20NAVIMOW%5FBRIDGE%20AuthCode%20
+      <br><br> 
+      This REDIRECT_URI must contain the host that you set yourself in the browser for 
+      access FHEM, usually the IP address of the FHEM server. This is intended to send 
+      the authorization code as a command via FHEMWEB API be transferred to the defined 
+	  master device (here e.g. NAVIMOW_BRIDGE). <br>
+	  When using the csrfToken in FHEM, a static token must be used and 
+      appended to the REDIRECT_URI (&fwcsrf=myToken123). 
+      <br><br>
+      Since the individual definition is more complex and presents various pitfalls, 
+      especially when using security functions such as csrfToken or access 
+      restrictions in FHEM, I would recommed to rookies to use the generic REDIRECT_URI 
+      http://localhost:1/callback instead.
+      <br><br>
+      After the master device has been created, a Navimow cloud login (OAuth2) is 
+      required. The individual link is stored in the internals (Internal 
+      AUTHORIZATION_LINK). After you logged in, you will be redirected to the REDIRECT_URI. 
+      If you have configured an individual REDIRECT_URI for FHEM, the authorization code is 
+      automatically passed to FHEM. If this doesn't work, check your REDIRECT_URI 
+      or use the generic REDIRECT_URI given above. When using the generic REDIRECT_URI: 
+      You have to copy the complete redirect-link of the website from the browser
+      (http://localhost:1/callback?code=xxxxxxxxxxxx) to the clipboard. 
+      Then enter the following command in FHEM:<br><br>
+      <code>set &lt;NAME NAVIMOW_BRIDGE&gt; AuthCode &lt;complete link of return URL&gt;
+      </code><br><br>
+      This completes the setup of the master device.<br><br>
+      <b><u>Definition of the mower units</u></b><br><br>
+      Thereafter for each mower unit one device has to be defined. It is 
+      easiest to let the devices be autocreated (see attributes). Otherwise 
+      they can also be created manually if the serial number is known:<br><br>
+      <code>define &lt;NAME&gt; Navimow &lt;SERIAL NUMBER&gt;</code><br>
+    </ul>
+  </ul>
+  <br>
+  <b>Set</b>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-set-AuthCode"></a>
+      <li><b>AuthCode</b><br>
+        The Navimow-Cloud-Login (OAuth2) returns a temporary authorization-code 
+        to get the access-token and a refresh-token. If the automatic process 
+        fails, you can set the authorization-code (=return of the redirect-uri) 
+        manually.
+      </li>
+      <a id="Navimow-set-connectMQTT"></a>
+      <li><b>connectMQTT</b><br>
+        Establishes a connection to the MQTT server to receive live data (location).
+      </li>
+	  <br>
+      <a id="Navimow-set-disconnectMQTT"></a>
+      <li><b>disconnectMQTT</b><br>
+        Terminates the connection to the MQTT server.
+      </li>	  
+    </ul>
+    Currently, only simple control via the API is possible:<br>
+    <br>
+    <ul>
+      <a id="Navimow-set-start"></a>
+      <li><b>start</b><br>
+       Starts the mower. Selecting a zone is currently not possible. 
+      </li>
+      <a id="Navimow-set-stop"></a>
+      <li><b>stop</b><br>
+        Stops the mower and ends the task.
+      </li>
+      <a id="Navimow-set-pause"></a>
+      <li><b>pause</b><br>
+        Stops the mower and pauses the task.
+      </li>
+	  <a id="Navimow-set-resume"></a>
+      <li><b>resume</b><br>
+        Restart the mower and resume the task
+      </li>
+	  <a id="Navimow-set-dock"></a>
+      <li><b>dock</b><br>
+        Send the mower to the charging station.
+      </li>
+    </ul>
+  </ul>
+  <br>
+  <b>Get</b> 
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-get-refreshToken"></a>
+      <li><b>refreshToken</b><br>
+        The access token is normally valid for 3,600 seconds. However, it can 
+        be renewed. This process is usually triggered automatically before the 
+        validity period expires. A manual renewal can also be initiated using 
+        this command.
+      </li>
+	  <a id="Navimow-get-devices"></a>
+      <li><b>devices</b><br>
+        Generates an immediate request to the cloud to retrieve the registered 
+        mowers and their serial numbers. If the autocreate attribute is set to 
+        1, the corresponding devices are automatically created in FHEM.
+      </li>
+      <a id="Navimow-get-devicestatus"></a>
+      <li><b>devicestatus</b><br>
+        Generates an immediate request to the cloud to retrieve the current 
+        data for all devices defined in FHEM.
+      </li>
+      <a id="Navimow-get-mqtt-credentials"></a>
+      <li><b>mqtt-credentials</b><br>
+        Generates an immediate request to the cloud to obtain the required 
+        access credentials for the MQTT server.
+      </li>
+    </ul>
+  </ul>
+  <br>
+  <b>Attributes</b> (only for the master device)<br>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-attr-autocreate"></a>
+      <li><b>autocreate</b> [ 1 | 0 ]<br>
+        When set to 1 (default), new devices are automatically created 
+        when corresponding data is received from the cloud. 
+        Set this value to 0 or delete it to disable the 
+        automatic creation of devices.
+        <br>
+      </li>
+      <a id="Navimow-attr-interval"></a>
+      <li><b>interval</b> [ 0 | 60 .. &infin; ]<br>
+        Defines the interval in seconds at which current data is to be 
+        retrieved from the cloud via an HTTP request. The minimum is 60 
+        seconds to keep server load low. The default is 900 seconds. If 
+        the attribute is set to 0, automatic retrieval is disabled. This 
+        attribute is available only on the master device.
+        <br>
+      </li>
+	  <a id="Navimow-attr-MQTT"></a>
+      <li><b>MQTT</b> [ 1 | 0 ]<br>
+        When set to 1 (default), a connection to the MQTT server is 
+        established alongside the HTTP request to enable the receipt of 
+        live data; if the attribute is set to 0, the connection to the 
+        MQTT server is disabled. This attribute is available only on the 
+        master device.
+        <br>
+      </li>
+	  <a id="Navimow-attr-saveRawData"></a>
+      <li><b>saveRawData</b> [ 0 | 1 ]<br>
+        When set to 1 (default = 0), the received data is stored in raw 
+        format (JSON string) in the `saveRawData` reading. This is 
+        primarily intended for debugging or troubleshooting purposes. 
+        This attribute is available only on the master device.
+        <br>
+      </li>
+    </ul>
+  </ul>
+</ul>
+<br>
+
+=end html
+=begin html_DE
+
+<a id="Navimow"></a>
+<h3>Navimow</h3>
+<ul>
+  Dieses Modul kann Daten von Navimow-Roboter (Segway) empfangen und Befehle zum 
+  Steuern senden.
+  <br><br>
+  <a id="Navimow-define"></a>
+  <b>Define</b>
+  <ul>
+    <ul>
+      <br>
+      Zuerst muss ein Master-Device (bzw. eine Bridge) definiert werden, 
+      welches den Zugriff auf die Cloud erm&ouml;glicht:<br><br>
+      <b><u>Definition des Master-Devices</u></b><br><br>
+	  <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow</code><br>
+	  oder individuell vorhandenen Konfigurationsdaten:<br>
+      <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow &lt;CLIENT_ID&gt; 
+      &lt;CLIENT_SECRET&gt; &lt;REDIRECT_URI&gt;</code><br>
+      <br>
+      CLIENT_ID und CLIENT_SECRET werden aktuell von home-assistant uebernommen.
+	  <br><br>
+      Es besteht auch die M&ouml;glichkeit, eine individuelle REDIRECT_URI für 
+      FHEM zu definieren. Diese muss nach folgendem Schema erstellt/definiert werden:
+      <br><br>
+      https://&lt;IP FHEM&gt;:8083/fhem?cmd.Test=set%20NAVIMOW%5FBRIDGE%20AuthCode%20
+      <br><br>
+      Diese REDIRECT_URI muss den Host enthalten, den man selbst im Browser für den 
+      Zugriff auf FHEM verwendet, also in der Regel die IP-Adresse des FHEM-Servers. 
+      Damit soll &uuml;ber die WEB-API von FHEM der Authorisierungscode als Kommando 
+      in das definierte Master-Device (hier z.B. NAVIMOW_BRIDGE) &uuml;bergeben werden. 
+      Bei Benutzung des csrfToken in FHEM, muss ein statisches Token verwendet werden 
+	  und dieses an die REDIRECT_URI angehangen werden (&fwcsrf=myToken123).
+      <br><br>
+      Da die individuelle Definition aufw&auml;ndiger und insbesondere bei Verwendung 
+      von Sicherheitsfunktion wie csrfToken oder Zugriffsbeschr&auml;nkungen in FHEM 
+      verschiedene Fallstricke bereit h&auml;lt, kann stattdessen 
+	  http://localhost:1/callback als REDIRECT_URI verwendet werden.
+      <br><br>
+      Nachdem das Master-Device angelegt worden ist, ist ein Navimow-Cloud-Login (OAuth2) 
+      erforderlich. Der individuelle Link ist in den Internals gespeichert 
+      (Internal AUTHORIZATION_LINK). Ihr werdet auf die Seite von Segway geleitet, 
+      m&uuml;sst euch dort einloggen. Anschliessend werdet ihr auf die REDIRECT_URI 
+	  weitergeleitet.
+      <br><br>
+      Wenn ihr eine individuelle REDIRECT_URI für FHEM konfiguriert habt, wird der 
+      Authorisierungscode automatisch an FHEM &uuml;bergeben. Wenn dies nicht funktioniert, 
+      &uuml;berpr&uuml;ft eure REDIRECT_URI oder verwendet die oben angegebene allgemeime 
+      REDIRECT_URI http://localhost:1/callback . In diesem muss der komplette Link der 
+	  Internetseite aus dem Browser (http://localhost:1/callback?code=xxxxxxxxxxxx) 
+      in die Zwischenablage kopiert und in FHEM als set-command eingegeben werden:<br><br>
+      <code>set &lt;NAME NAVIMOW_BRIDGE&gt; AuthCode &lt;kompletter Link der R&uuml;ckgabe-URL&gt;
+      </code><br><br>
+      Damit ist die Einrichtung des Master-Device abgeschlossen.<br><br>
+      <b><u>Definition der Mower</u></b>
+      <br><br>
+      Danach ist f&uuml;r jeden Mower ein Device zu definieren. 
+      Es ist am einfachsten, die Devices automatisch erstellen zu lassen 
+      (siehe Attribute). Ansonsten k&ouml;nnen sie auch manuell erstellt 
+      werden, wenn die Seriennummer bereits bekannt ist:<br><br>
+      <code>define &lt;NAME&gt; Navimow &lt;SeriennummerD&gt;</code><br>
+    </ul>
+  </ul>
+  <br>
+  <b>Set</b>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-set-AuthCode"></a>
+      <li><b>AuthCode</b><br>
+        Der Navimow-Cloud-Login (OAuth2) gibt einen tempor&auml;ren 
+        Autorisierungscode zur&uuml;ck. Falls der automatische Prozess 
+        scheitert, kann der Autorisierungscode (= R&uuml;ckgabe an die 
+        redirect-uri) auch manuell gesetzt werden.
+      </li>
+      <br>
+      <a id="Navimow-set-connectMQTT"></a>
+      <li><b>connectMQTT</b><br>
+        Stellt eine Verbindung zum MQTT-Server, um Live-Daten (location) zu 
+		erhalten.
+      </li>
+      <br>
+      <a id="Navimow-set-disconnectMQTT"></a>
+      <li><b>disconnectMQTT</b><br>
+        Beendet die Verbindung zum MQTT-Server.
+      </li>
+    </ul>
+    Aktuell ist nur eine einfache Steuerung &uuml;ber die API m&ouml;glich:<br>
+    <br>
+    <ul>
+      <a id="Navimow-set-start"></a>
+      <li><b>start</b><br>
+        Startet den Mower. Eine Auswahl der Zone ist aktuell nicht m&ouml;glich. 
+      </li>
+      <a id="Navimow-set-stop"></a>
+      <li><b>stop</b><br>
+        H&auml;lt den Mower bzw. stoppt die Arbeitsaufgabe.
+      </li>
+      <a id="Navimow-set-pause"></a>
+      <li><b>pause</b><br>
+        H&auml;lt den Mower an und pausiert die Arbeitsaufgabe.
+      </li>
+	  <a id="Navimow-set-resume"></a>
+      <li><b>resume</b><br>
+        Startet den Mower wieder und f&uuml;hrt die Arbeitsaufgabe fort.
+      </li>
+	  <a id="Navimow-set-dock"></a>
+      <li><b>dock</b><br>
+        Schickt den Mower zur Ladestation.
+      </li>
+    </ul>
+  </ul>
+  <br>
+  <b>Get</b>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-get-refreshToken"></a>
+      <li><b>refreshToken</b><br>
+        Der Access-Token ist normalerweise 3600 Sekunden g&uuml;tig. Er kann 
+        aber erneuert werden. Dies wird normalerweise automatisch vor Ablauf 
+        der G&uuml;tigkeitsdauer veranlasst. Mit diesem Befehl kann auch eine 
+        manuelle Erneuerung angesto&szlig;en werden.
+      </li>
+	  <a id="Navimow-get-devices"></a>
+      <li><b>devices</b><br>
+        Erzeugt eine sofortige Anfrage an die Cloud, um die registrierten 
+        Mower und ihre Seriennummer zu erhalten. Wenn das Attribut autocreate 
+        mit 1 definiert ist, werden die entsprechenden Ger&auml;te automatisch 
+        in FHEM angelegt.
+      </li>
+      <a id="Navimow-get-devicestatus"></a>
+      <li><b>devicestatus</b><br>
+        Erzeugt eine sofortige Anfrage an die Cloud, um die aktuellen Daten der 
+        aller in FHEM definierten Ger&auml;te zu erhalten.
+      </li>
+      <a id="Navimow-get-mqtt-credentials"></a>
+      <li><b>mqtt-credentials</b><br>
+        Erzeugt eine sofortige Anfrage an die Cloud, um die erforderlichen 
+		Zugangsdaten f&uuml;r dem MQTT-Server zu bekommen.
+      </li>
+    </ul>
+  </ul>
+  <br>
+  <b>Attributes</b> (nur f&uuml;r das Master-Device)<br>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-attr-autocreate"></a>
+      <li><b>autocreate</b> [ 1 | 0 ]<br>
+        Bei Einstellung auf 1 (Standard) werden neue Devices automatisch 
+        erstellt, wenn entsprechende Daten aus der Cloud empfangen werden. 
+        Setzen Sie diesen Wert auf 0 oder l&ouml;schen ihn, um die 
+        automatische Erstellung von Devices zu deaktivieren. 
+        <br>
+      </li>
+      <a id="Navimow-attr-interval"></a>
+      <li><b>interval</b> [ 0 | 60 .. &infin; ]<br>
+        Definiert das Intervall in Sekunden, innerhalb dessen die aktuellen 
+        Daten aus der Cloud jeweils &uuml;ber einen HTTP-Request abgefragt 
+		werden sollen. Das Minimum betr&auml;gt 60 Sekunden, um die Serverlast
+        gering zu halten. Standard sind 900 Sekunden. Wenn das Attribut auf 0 
+		gesetzt wird, wird der automatisierte Abruf deaktiviert. Dieses Attribut 
+		ist nur im Master-Device verf&uuml;gbar.<br>
+      </li>
+	  <a id="Navimow-attr-MQTT"></a>
+      <li><b>MQTT</b> [ 1 | 0 ]<br>
+        Bei Einstellung auf 1 (Standard), wird neben den HTTP-Request eine 
+        Verbidnung zum MQTT-Server aufgebaut, um Live-Daten empfangen zu
+        k&ouml;nnen; Wenn das Attribut auf 0 gesetzt wird, wird die Verbindung 
+        zum MQTT-Server deaktiviert.  Dieses Attribut ist nur im Master-Device 
+        verf&uuml;gbar.<br>
+      </li>
+	  <a id="Navimow-attr-saveRawData"></a>
+      <li><b>saveRawData</b> [ 0 | 1 ]<br>
+        Bei Einstellung auf 1 (Standard = 0), werden die empfangenen Daten 
+        im Roh-Format (Json-String) im Reading saveRawData gespeichert. Dies
+        soll vorrangig dem debugging bzw. der Fehlersuche dienen. Dieses 
+        Attribut ist nur im Master-Device verf&uuml;gbar.<br>
+      </li>
+    </ul>
+  </ul>
+</ul>
+<br>
+
+=end html_DE
+
+=cut
