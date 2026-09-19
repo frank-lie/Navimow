@@ -5,7 +5,8 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
-# v0.2.3 - 19.09.2026 fix error when deleting iomaster
+# v0.2.4 - 19.09.2026 set-cmd for mower device add noArg
+# v0.2.3 - 19.09.2026 fix error when deleting iomaster, fix error on attrVal to start mqtt connect
 # v0.2.2 - 18.09.2026 documentation
 # v0.2.1 - 18.09.2026 extended logging & readingsUpdate
 # v0.2.0 - 15.09.2026 seperate iomaster and devices
@@ -32,7 +33,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.2.3 - 19.09.2026';
+my $Navimow_version = 'v0.2.4 - 19.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -367,7 +368,7 @@ sub Navimow_Set($$@)
 			Log3($name, 5, "$name (Set_Cmd): $cmd = $data");
 			Navimow_Request($hash, 'POST', '/openapi/smarthome/sendCommands', $data);
 		} else {
-			$setlist = 'start stop pause resume dock';			
+			$setlist = 'start:noArg stop:noArg pause:noArg resume:noArg dock:noArg';			
 		}
 	}
 	return "unknown argument $cmd , choose one of $setlist" if ($setlist ne '');
