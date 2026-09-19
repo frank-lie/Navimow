@@ -5,6 +5,7 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.2.3 - 19.09.2026 fix error when deleting iomaster
 # v0.2.2 - 18.09.2026 documentation
 # v0.2.1 - 18.09.2026 extended logging & readingsUpdate
 # v0.2.0 - 15.09.2026 seperate iomaster and devices
@@ -31,7 +32,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.2.2 - 18.09.2026';
+my $Navimow_version = 'v0.2.3 - 19.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -135,7 +136,7 @@ sub Navimow_Define($$)
 	
 		$hash->{CLIENT_ID}     = defined($a[2]) ? $a[2] : 'homeassistant';
 		$hash->{CLIENT_SECRET} = defined($a[3]) ? $a[3] : '57056e15-722e-42be-bbaa-b0cbfb208a52';
-		$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : 'http://localhost:1/callback';
+		$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : 'http://localhost/callback';
 	
 		$hash->{DEF} = $hash->{CLIENT_ID}.' '.$hash->{CLIENT_SECRET}.' '.$hash->{REDIRECT_URI};
 		
@@ -153,7 +154,7 @@ sub Navimow_Define($$)
 	
 		if (defined($r_token)) {
 			$hash->{helper}{REFRESH_TOKEN} = $r_token;
-			Log3($name, 2, "$name (Define at start): Refresh-Token ready to use.");
+			Log3($name, 2, "$name (Define): Refresh-Token ready to use.");
 		} else {
 			## else delete old tokens
 			delete $hash->{helper}{ACCESS_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{ACCESS_TOKEN}));
@@ -178,6 +179,7 @@ sub Navimow_Undefine($$)
 	my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
 	if ( defined($iomaster) && $hash eq $iomaster ) {
 		setKeyValue('Navimow_refresh_token',undef);
+		delete $modules{Navimow}{defptr}{IOMASTER};
 		Navimow_MQTT_Disconnect($hash, 0);
 		RemoveInternalTimer($hash);
 	}
@@ -537,7 +539,8 @@ sub Navimow_Attr($$$;$)
 			if (( $cmd eq 'del' ) || ( $attrVal == 0 )) {
 				Navimow_MQTT_Disconnect($hash, 0);
 			} elsif ( $attrVal == 1 ) {
-				Navimow_MQTT_Connect($hash);
+				## first complete the attribut-change, then start Navimow_MQTT_Connect
+				InternalTimer(gettimeofday() + 1, 'Navimow_MQTT_Connect', $hash, 0);
 			}
 		}		
 	}
@@ -902,8 +905,8 @@ sub Navimow_MQTT_Keepalive($)
 
 =pod
 =item device
-=item summary    controls daikin airconditioning units over cloud access 
-=item summary_DE steuert Daikin Klimaanlagen mit Cloud-Zugriff
+=item summary    Cloud connection for segway navimow devices (mower) 
+=item summary_DE Cloud-Anbindung fuer Segway Navimow Geraete (Maehroboter) 
 =begin html
 
 <a id="Navimow"></a>
@@ -912,7 +915,7 @@ sub Navimow_MQTT_Keepalive($)
   This module can receive data from Navimow-Mower over the Segway-cloud. It can 
   also send simple commands.
   <br><br>
-  <a id="DaikinCloud-define"></a>
+  <a id="Navimow-define"></a>
   <b>Define</b>
   <ul>
     <ul>
@@ -942,7 +945,7 @@ sub Navimow_MQTT_Keepalive($)
       Since the individual definition is more complex and presents various pitfalls, 
       especially when using security functions such as csrfToken or access 
       restrictions in FHEM, I would recommed to rookies to use the generic REDIRECT_URI 
-      http://localhost:1/callback instead.
+      http://localhost/callback instead.
       <br><br>
       After the master device has been created, a Navimow cloud login (OAuth2) is 
       required. The individual link is stored in the internals (Internal 
@@ -951,7 +954,7 @@ sub Navimow_MQTT_Keepalive($)
       automatically passed to FHEM. If this doesn't work, check your REDIRECT_URI 
       or use the generic REDIRECT_URI given above. When using the generic REDIRECT_URI: 
       You have to copy the complete redirect-link of the website from the browser
-      (http://localhost:1/callback?code=xxxxxxxxxxxx) to the clipboard. 
+      (http://localhost/callback?code=xxxxxxxxxxxx) to the clipboard. 
       Then enter the following command in FHEM:<br><br>
       <code>set &lt;NAME NAVIMOW_BRIDGE&gt; AuthCode &lt;complete link of return URL&gt;
       </code><br><br>
@@ -1090,7 +1093,7 @@ sub Navimow_MQTT_Keepalive($)
 <a id="Navimow"></a>
 <h3>Navimow</h3>
 <ul>
-  Dieses Modul kann Daten von Navimow-Roboter (Segway) empfangen und Befehle zum 
+  Dieses Modul kann Daten von Navimow-Robotern (Segway) empfangen und Befehle zum 
   Steuern senden.
   <br><br>
   <a id="Navimow-define"></a>
@@ -1101,17 +1104,17 @@ sub Navimow_MQTT_Keepalive($)
       Zuerst muss ein Master-Device (bzw. eine Bridge) definiert werden, 
       welches den Zugriff auf die Cloud erm&ouml;glicht:<br><br>
       <b><u>Definition des Master-Devices</u></b><br><br>
-	  <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow</code><br>
-	  oder individuell vorhandenen Konfigurationsdaten:<br>
+	  <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow</code><br><br>
+	  oder mit individuell vorhandenen Konfigurationsdaten:<br><br>
       <code>define &lt;NAME NAVIMOW_BRIDGE&gt; Navimow &lt;CLIENT_ID&gt; 
-      &lt;CLIENT_SECRET&gt; &lt;REDIRECT_URI&gt;</code><br>
-      <br>
-      CLIENT_ID und CLIENT_SECRET werden aktuell von home-assistant uebernommen.
+      &lt;CLIENT_SECRET&gt; &lt;REDIRECT_URI&gt;</code><br><br>
+      CLIENT_ID und CLIENT_SECRET werden aktuell von der Schnittstelle f&uuml; 
+      home-assistant adaptiert (vgl. https://github.com/segwaynavimow/NavimowHA ).
 	  <br><br>
       Es besteht auch die M&ouml;glichkeit, eine individuelle REDIRECT_URI für 
-      FHEM zu definieren. Diese muss nach folgendem Schema erstellt/definiert werden:
+      FHEM zu definieren. Diese muss nach folgendem Schema erstellt bzw. definiert werden:
       <br><br>
-      https://&lt;IP FHEM&gt;:8083/fhem?cmd.Test=set%20NAVIMOW%5FBRIDGE%20AuthCode%20
+      <code>https://&lt;IP FHEM&gt;:8083/fhem?cmd.Test=set%20NAVIMOW%5FBRIDGE%20AuthCode%20</code>
       <br><br>
       Diese REDIRECT_URI muss den Host enthalten, den man selbst im Browser für den 
       Zugriff auf FHEM verwendet, also in der Regel die IP-Adresse des FHEM-Servers. 
@@ -1123,7 +1126,7 @@ sub Navimow_MQTT_Keepalive($)
       Da die individuelle Definition aufw&auml;ndiger und insbesondere bei Verwendung 
       von Sicherheitsfunktion wie csrfToken oder Zugriffsbeschr&auml;nkungen in FHEM 
       verschiedene Fallstricke bereit h&auml;lt, kann stattdessen 
-	  http://localhost:1/callback als REDIRECT_URI verwendet werden.
+      <code>http://localhost/callback</code> als REDIRECT_URI verwendet werden.
       <br><br>
       Nachdem das Master-Device angelegt worden ist, ist ein Navimow-Cloud-Login (OAuth2) 
       erforderlich. Der individuelle Link ist in den Internals gespeichert 
@@ -1134,8 +1137,8 @@ sub Navimow_MQTT_Keepalive($)
       Wenn ihr eine individuelle REDIRECT_URI für FHEM konfiguriert habt, wird der 
       Authorisierungscode automatisch an FHEM &uuml;bergeben. Wenn dies nicht funktioniert, 
       &uuml;berpr&uuml;ft eure REDIRECT_URI oder verwendet die oben angegebene allgemeime 
-      REDIRECT_URI http://localhost:1/callback . In diesem muss der komplette Link der 
-	  Internetseite aus dem Browser (http://localhost:1/callback?code=xxxxxxxxxxxx) 
+      REDIRECT_URI<code>http://localhost/callback</code>. In diesem muss der komplette Link der 
+	  Internetseite aus dem Browser (http://localhost/callback?code=xxxxxxxxxxxx) 
       in die Zwischenablage kopiert und in FHEM als set-command eingegeben werden:<br><br>
       <code>set &lt;NAME NAVIMOW_BRIDGE&gt; AuthCode &lt;kompletter Link der R&uuml;ckgabe-URL&gt;
       </code><br><br>
@@ -1146,7 +1149,7 @@ sub Navimow_MQTT_Keepalive($)
       Es ist am einfachsten, die Devices automatisch erstellen zu lassen 
       (siehe Attribute). Ansonsten k&ouml;nnen sie auch manuell erstellt 
       werden, wenn die Seriennummer bereits bekannt ist:<br><br>
-      <code>define &lt;NAME&gt; Navimow &lt;SeriennummerD&gt;</code><br>
+      <code>define &lt;NAME&gt; Navimow &lt;SERIENNUMMER&gt;</code><br>
     </ul>
   </ul>
   <br>
@@ -1172,6 +1175,7 @@ sub Navimow_MQTT_Keepalive($)
       <li><b>disconnectMQTT</b><br>
         Beendet die Verbindung zum MQTT-Server.
       </li>
+	  <br>
     </ul>
     Aktuell ist nur eine einfache Steuerung &uuml;ber die API m&ouml;glich:<br>
     <br>
@@ -1212,19 +1216,19 @@ sub Navimow_MQTT_Keepalive($)
       </li>
 	  <a id="Navimow-get-devices"></a>
       <li><b>devices</b><br>
-        Erzeugt eine sofortige Anfrage an die Cloud, um die registrierten 
+        Erzeugt eine sofortige HTTP-Anfrage an die Cloud, um die registrierten 
         Mower und ihre Seriennummer zu erhalten. Wenn das Attribut autocreate 
         mit 1 definiert ist, werden die entsprechenden Ger&auml;te automatisch 
         in FHEM angelegt.
       </li>
       <a id="Navimow-get-devicestatus"></a>
       <li><b>devicestatus</b><br>
-        Erzeugt eine sofortige Anfrage an die Cloud, um die aktuellen Daten der 
+        Erzeugt eine sofortige HTTP-Anfrage an die Cloud, um die aktuellen Daten  
         aller in FHEM definierten Ger&auml;te zu erhalten.
       </li>
       <a id="Navimow-get-mqtt-credentials"></a>
       <li><b>mqtt-credentials</b><br>
-        Erzeugt eine sofortige Anfrage an die Cloud, um die erforderlichen 
+        Erzeugt eine sofortige HTTP-Anfrage an die Cloud, um die erforderlichen 
 		Zugangsdaten f&uuml;r dem MQTT-Server zu bekommen.
       </li>
     </ul>
@@ -1256,7 +1260,7 @@ sub Navimow_MQTT_Keepalive($)
         Bei Einstellung auf 1 (Standard), wird neben den HTTP-Request eine 
         Verbidnung zum MQTT-Server aufgebaut, um Live-Daten empfangen zu
         k&ouml;nnen; Wenn das Attribut auf 0 gesetzt wird, wird die Verbindung 
-        zum MQTT-Server deaktiviert.  Dieses Attribut ist nur im Master-Device 
+        zum MQTT-Server deaktiviert. Dieses Attribut ist nur im Master-Device 
         verf&uuml;gbar.<br>
       </li>
 	  <a id="Navimow-attr-saveRawData"></a>
@@ -1268,6 +1272,7 @@ sub Navimow_MQTT_Keepalive($)
       </li>
     </ul>
   </ul>
+  <br>
 </ul>
 <br>
 
