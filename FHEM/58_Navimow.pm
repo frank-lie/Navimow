@@ -5,6 +5,8 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.2.1 - 18.09.2026 extended logging & readingsUpdate
+# v0.2.0 - 15.09.2026 seperate iomaster and devices
 # v0.1.0 - 14.09.2026 mqtt support
 # v0.0.4 - 02.09.2026 Code cleanup
 # v0.0.3 - 31.08.2026 Commands start, stop, pause, resume, dock over Rest-API
@@ -28,7 +30,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.1.0 - 14.09.2026';
+my $Navimow_version = 'v0.2.1 - 18.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -47,15 +49,16 @@ sub Navimow_CallbackGetToken;		# extract the tokens from the response and store 
 sub Navimow_GetToken($$);			# send the authorization-code to get the tokens
 sub Navimow_RefreshToken($);		# do a refresh of the access-token, which is only valid for 1 hour
 
-sub Navimow_Set($$$$);				# handle the set commands of devices
+sub Navimow_Set($$@);				# handle the set commands of devices
 sub Navimow_Get($$@);				# handle the get commands of devices
-sub Navimow_Attr($$);				# handle the change of attributes
+sub Navimow_Attr($$$;$);			# handle the change of attributes
 
 sub Navimow_Polltimer($;$);			# schedule next polling interval
 sub Navimow_Request($;$$$);			# get/post a request
 sub Navimow_Response;				# receive data from the cloud
 
-sub Navimow_GetDetail($$$$);		# parse json
+sub Navimow_GetDetail($$$);			# parse json
+sub Navimow_Transformdata($$);		# transform json-txt to data
 
 sub Navimow_MQTT_Connect($);		# send HTTP-request to initiate MQTT-session
 sub Navimow_MQTT_Login($);		    # login in MQTT-session
@@ -75,7 +78,6 @@ sub Navimow_Initialize($)
 	$hash->{GetFn}    = 'Navimow_Get';
 	$hash->{AttrFn}   = 'Navimow_Attr';
 	$hash->{ReadFn}   = 'Navimow_MQTT_Read';
-	#$hash->{WriteFn}  = 'Navimow_MQTT_Write';#-> erforderlich ?!!
 }
 
 sub Navimow_UUID
@@ -110,20 +112,33 @@ sub Navimow_Define($$)
 	if (int(@a) > 2 && $a[2] eq "?" ) {
 		return "Syntax: define <NAME> Navimow <CLIENT_ID> <CLIENT_SECRET> <REDIRECT_URI>"; 
 	};
-	
 	my $name = $a[0]; # a[0]=name; a[1]=Navimow; a[2]..a[4]= parameters
 	
-	$hash->{INTERVAL} = 900;
-	$hash->{VERSION} = $Navimow_version;
-	$hash->{helper}{secret_state} = Navimow_CreateSecretState();
+	## handle define of mow units
+	if (int(@a) == 3) {
+		my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+		return 'Cannot modify master device to mow device!' if (defined($iomaster) && $hash eq $iomaster);
+		$modules{Navimow}{defptr}{$a[2]} = $hash;
+		setDevAttrList($name, '' . $readingFnAttributes);
+		if ($init_done) {
+			CommandAttr(undef, '-silent '.$name.' room Navimow_Devices') if(!defined(AttrVal($name,"room",undef)));
+			CommandAttr(undef, '-silent '.$name.' event-on-change-reading .*') if(!defined(AttrVal($name,"event-on-change-reading",undef)));			
+		}
+	} else {
+		## handle define of IO-MASTER device as a bridge
+		my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+		return "Master device already defined as $iomaster->{NAME} !" if (defined($iomaster) && $iomaster->{NAME} ne $name);
+		$hash->{INTERVAL} = 900;
+		$hash->{VERSION} = $Navimow_version;
+		$hash->{helper}{secret_state} = Navimow_CreateSecretState();
 	
-	$hash->{CLIENT_ID}     = defined($a[2]) ? $a[2] : 'homeassistant';
-	$hash->{CLIENT_SECRET} = defined($a[3]) ? $a[3] : '57056e15-722e-42be-bbaa-b0cbfb208a52';
-	$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : 'http://localhost:1/callback';
+		$hash->{CLIENT_ID}     = defined($a[2]) ? $a[2] : 'homeassistant';
+		$hash->{CLIENT_SECRET} = defined($a[3]) ? $a[3] : '57056e15-722e-42be-bbaa-b0cbfb208a52';
+		$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : 'http://localhost:1/callback';
 	
-	$hash->{DEF} = $hash->{CLIENT_ID}.' '.$hash->{CLIENT_SECRET}.' '.$hash->{REDIRECT_URI};
+		$hash->{DEF} = $hash->{CLIENT_ID}.' '.$hash->{CLIENT_SECRET}.' '.$hash->{REDIRECT_URI};
 		
-	$hash->{AUTHORIZATION_LINK} = "<html><b><a href=\"".$navimow_oauth_url.#"authorize?".
+		$hash->{AUTHORIZATION_LINK} = "<html><b><a href=\"".$navimow_oauth_url.#"authorize?".
 			"&response_type=code".
 			"&client_id=".$hash->{CLIENT_ID}.
 			"&redirect_uri=".urlEncode($hash->{REDIRECT_URI}).
@@ -131,22 +146,27 @@ sub Navimow_Define($$)
 			"\" target=\"_blank\">Segway Navimow Login (OAuth2)</a></b> ".
 			"</html>";
 		
-	my (undef, $r_token) = getKeyValue('Navimow_refresh_token');
+		$modules{Navimow}{defptr}{IOMASTER} = $hash;
+		
+		my (undef, $r_token) = getKeyValue('Navimow_refresh_token');
 	
-	if (defined($r_token)) {
-		$hash->{helper}{REFRESH_TOKEN} = $r_token;
-		Log3 $name, 2, 'Navimow (Define at start): Refresh-Token ready to use.';
-	} else {
-		## else delete old tokens
-		delete $hash->{helper}{ACCESS_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{ACCESS_TOKEN}));
-		delete $hash->{helper}{REFRESH_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{REFRESH_TOKEN}));
-	}
+		if (defined($r_token)) {
+			$hash->{helper}{REFRESH_TOKEN} = $r_token;
+			Log3($name, 2, "$name (Define at start): Refresh-Token ready to use.");
+		} else {
+			## else delete old tokens
+			delete $hash->{helper}{ACCESS_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{ACCESS_TOKEN}));
+			delete $hash->{helper}{REFRESH_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{REFRESH_TOKEN}));
+		}
 		 
-	setDevAttrList($name, 'interval saveRawData:1,0 MQTT:1,0'. $readingFnAttributes);
-	if ($init_done) {
-		CommandAttr(undef, '-silent '.$name.' interval 900') if(!defined(AttrVal($name,"interval",undef)));
-		CommandAttr(undef, '-silent '.$name.' event-on-change-reading .*') if(!defined(AttrVal($name,"event-on-change-reading",undef)));
-		CommandAttr(undef, '-silent '.$name.' MQTT 1') if(!defined(AttrVal($name,"MQTT",undef)));
+		setDevAttrList($name, 'autocreate:1,0 interval saveRawData:1,0 MQTT:1,0 '. $readingFnAttributes);
+		if ($init_done) {
+			CommandAttr(undef, '-silent '.$name.' room Navimow_Devices') if(!defined(AttrVal($name,"room",undef)));
+			CommandAttr(undef, '-silent '.$name.' event-on-change-reading .*') if(!defined(AttrVal($name,"event-on-change-reading",undef)));
+			CommandAttr(undef, '-silent '.$name.' autocreate 1') if(!defined(AttrVal($name,"autocreate",undef)));			
+			CommandAttr(undef, '-silent '.$name.' MQTT 1') if(!defined(AttrVal($name,"MQTT",undef)));
+			CommandAttr(undef, '-silent '.$name.' interval 900') if(!defined(AttrVal($name,"interval",undef)));
+		}
 	}
 	return undef;
 }
@@ -154,8 +174,13 @@ sub Navimow_Define($$)
 sub Navimow_Undefine($$)
 {
 	my ($hash, $arg) = @_;
-	setKeyValue('Navimow_refresh_token',undef);
-	RemoveInternalTimer($hash);
+	my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+	if ( defined($iomaster) && $hash eq $iomaster ) {
+		setKeyValue('Navimow_refresh_token',undef);
+		Navimow_MQTT_Disconnect($hash, 0);
+		RemoveInternalTimer($hash);
+	}
+	delete $modules{Navimow}{defptr}{$hash->{DEF}} if (defined($hash->{DEF}));
 	return undef;
 }
 
@@ -163,6 +188,7 @@ sub Navimow_CallbackGetToken
 {
 	my ($param, $err, $data) = @_;
 	my $hash = $param->{hash};
+	my $name = $hash->{NAME};
 		
 	if ( $err || $param->{code} != 200 ) { 
 		my $errortext = 'Navimow (CallbackGetToken) failed: ';
@@ -172,7 +198,7 @@ sub Navimow_CallbackGetToken
 			$errortext .= "HTTP-Status-Code=" . $param->{code} if (defined($param->{code}));
 			$errortext .= " Response: " . $data if (defined($data));
 		}
-		Log3 $hash, 2, $errortext;
+		Log3($name, 2, "$name (CallbackGetToken): $errortext");
 		readingsBeginUpdate($hash);
 		readingsBulkUpdate($hash, 'token_status', $errortext );
 		readingsBulkUpdate($hash, 'token_type', 'invalid' );
@@ -187,7 +213,7 @@ sub Navimow_CallbackGetToken
 	my ($t_type) = ( $data =~ m/"token.?type"\s*:\s*"([^"]+)/i );
 	
 	if (!defined($a_token) || !defined($r_token)) {
-		Log3 $hash, 2, "Navimow (CallbackGetToken): No TokenSet found";
+		Log3($name, 2, "$name (CallbackGetToken): No TokenSet found");
 		readingsBeginUpdate($hash);
 		readingsBulkUpdate($hash, 'token_status', 'failed: no TokenSet retrieved');
 		readingsBulkUpdate($hash, 'token_type', 'none');
@@ -205,30 +231,34 @@ sub Navimow_CallbackGetToken
 	$hash->{helper}{REFRESH_TOKEN} = $r_token;	
 	setKeyValue('Navimow_refresh_token',$r_token);
 	
-	Log3 $hash, 4, 'Navimow (CallbackGetToken): TokenSet successfully stored' ;
+	Log3($name, 4, "$name (CallbackGetToken): TokenSet successfully stored");
 	
-	## do automatic request for available devices
-	Navimow_Request($hash, 'GET', '/openapi/smarthome/authList');
-	
-	## schedule Request in 6 secondes if polling is activated
-	Navimow_Polltimer($hash ,6);
+	## schedule next request in 1 second
+	Navimow_Polltimer($hash, 1);
 	
 	## do automatic refresh token 1 minute before expired
-    InternalTimer(gettimeofday()+ReadingsNum($hash->{NAME},'expires_in',3600)-60,'Navimow_RefreshToken',$hash,0);
+    InternalTimer(gettimeofday()+ReadingsNum($name,'expires_in',3600)-60,'Navimow_RefreshToken',$hash,0);
 	
 }
 
 sub Navimow_GetToken($$)
 {
-	my ($hash, $code) = @_;	
+	my ($hash, $code) = @_;
+	my $name = $hash->{NAME};
 
 	$code = urlDecode($code);
 	$code = $1 if ($code =~ m/code=([^&]*)/);
 	
 	if (length($code)<8) {
 		$code = $FW_webArgs{"code"} if defined($FW_webArgs{"code"});
-		return "No valid AuthCode" if (length($code)<8);
+		if (length($code)<8) {
+			readingsSingleUpdate($hash, 'token_status', 'no valid AuthCode', 1 );
+			return "No valid AuthCode";
+		};
+		
 	}	
+	
+	Log3($name, 5, "$name (GetToken): request for TokenSet .. (AuthCode = $code )");
 	
 	HttpUtils_NonblockingGet(
 	{
@@ -248,20 +278,24 @@ sub Navimow_GetToken($$)
 		}
 	});
 	readingsSingleUpdate($hash, 'token_status', 'request for TokenSet ..', 1 );
-	return;
+	return undef;
 }
 
 sub Navimow_RefreshToken($)
 {
-	my ($hash) = @_;	
-		
-	## remove all other timers do avoid double requests or invalid requests
+	my ($hash) = @_;
+	my $name = $hash->{NAME};
+	
+	## remove all other request timers do avoid double requests or invalid requests
 	RemoveInternalTimer($hash, 'Navimow_Request');
 	readingsSingleUpdate($hash, 'polling', 'inactiv', 1 );
 	
 	## check if refresh-token exists
 	my $r_token = $hash->{helper}{REFRESH_TOKEN};
-	return 'Navimow (RefreshToken): No Refresh-Token saved! Do a Navimow Cloud Login (OAuth2) first!' if (!defined($r_token));
+	if (!defined($r_token)) {
+		readingsSingleUpdate($hash, 'token_status', 'failed: no refresh-token', 1 );
+		return 'Navimow (RefreshToken): No Refresh-Token saved! Do a Navimow Cloud Login (OAuth2) first!' 
+	};
 
 	HttpUtils_NonblockingGet(
 	{
@@ -278,15 +312,16 @@ sub Navimow_RefreshToken($)
 			refresh_token => $r_token,
 		}
 	});
+	Log3($name, 5, "$name (RefreshToken): request for TokenRefresh");
 	readingsSingleUpdate($hash, 'token_status', 'request for TokenRefresh ..', 1 );
 	
 	## set new timer for update-request only for safety if refresh fails
 	Navimow_Polltimer($hash);
 	
-	return;
+	return undef;
 }
 
-sub Navimow_Set($$$$)
+sub Navimow_Set($$@)
 {
 	my ($hash, $name, @a) = @_;
 	return undef if not scalar @a;
@@ -294,43 +329,54 @@ sub Navimow_Set($$$$)
 	my $value = join(' ', @a);
 	my $setlist = '';
 	
-	if ( lc($cmd) eq 'authcode') {
+	my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+	## set for IOMASTER
+	if ( defined($iomaster) && ($hash eq $iomaster)) {
+		if ( lc($cmd) eq 'authcode') {
 		return Navimow_GetToken($hash, $value);
 		
-	} elsif ( lc($cmd) eq 'command') {
-		my $sn = $a[1] // ReadingsVal($name, 'device0_id', '');
+		} elsif ( lc($cmd) eq 'connectmqtt') {
+			return Navimow_MQTT_Connect($hash);
+		
+		} elsif ( lc($cmd) eq 'disconnectmqtt') {
+			return Navimow_MQTT_Disconnect($hash, 0);
+		
+		} else {
+			$setlist = 'AuthCode connectMQTT:noArg disconnectMQTT:noArg';
+		}
+	## set for mow units	
+	} else {
+		my $sn = $hash->{DEF} // '';
 		return "No serial number of device to command!" if ($sn eq '');
 		
-		my $action = $a[0] // '';
-		return "Allowed commands are only: start, stop, pause, resume, dock!" if !($action =~ m/start|stop|pause|resume|dock/ );
+		if ($cmd =~ m/start|stop|pause|resume|dock/ ) {
 		
-		my $data = '{"commands":[{"devices":[{"id":"'.$sn.'"}],"execution": {"command":"action.devices.commands.';
-		if ($action eq 'start')    { $data.= 'StartStop","params":{"on":true}}}]}';} 
-		elsif ($action eq 'stop')  { $data.= 'StartStop","params":{"on":false}}}]}';}
-		elsif ($action eq 'pause') { $data.= 'PauseUnpause","params":{"on":false}}}]}';} 
-		elsif ($action eq 'resume'){ $data.= 'PauseUnpause","params":{"on":true}}}]}';} 
-		elsif ($action eq 'dock')  { $data.= 'Dock","params":null}}]}';} 
-		else  {$data='';}
-		return "Error creating command!" if ($data eq '' );
-		
-		readingsSingleUpdate($hash, 'set_data', $data, 1 );
-		Navimow_Request($hash, 'POST', '/openapi/smarthome/sendCommands', $data);	
-			
-	} elsif ( lc($cmd) eq 'mqtt') {
-		return Navimow_MQTT_Connect($hash) if ($value eq 'connect');
-		return Navimow_MQTT_Disconnect($hash, 0) if ($value eq 'disconnect');
-		
-	} else  {
-		$setlist = 'AuthCode Command:start,stop,pause,resume,dock MQTT:connect,disconnect';
-		return "unknown argument $cmd : $value, choose one of $setlist";
+			my $data = '{"commands":[{"devices":[{"id":"'.$sn.'"}],"execution": {"command":"action.devices.commands.';
+			if ($cmd eq 'start')    { $data.= 'StartStop","params":{"on":true}}}]}';} 
+			elsif ($cmd eq 'stop')  { $data.= 'StartStop","params":{"on":false}}}]}';}
+			elsif ($cmd eq 'pause') { $data.= 'PauseUnpause","params":{"on":false}}}]}';} 
+			elsif ($cmd eq 'resume'){ $data.= 'PauseUnpause","params":{"on":true}}}]}';} 
+			elsif ($cmd eq 'dock')  { $data.= 'Dock","params":null}}]}';} 
+			else  {$data='';}
+			return "Error creating command!" if ($data eq '' );
+			readingsSingleUpdate($hash, 'set_data', $data, 1 ) if (AttrVal($name,'saveRawData',undef));
+			readingsSingleUpdate($hash, 'set_cmd', $cmd, 1 );
+			Log3($name, 5, "$name (Set_Cmd): $cmd = $data");
+			Navimow_Request($hash, 'POST', '/openapi/smarthome/sendCommands', $data);
+		} else {
+			$setlist = 'start stop pause resume dock';			
+		}
 	}
+	return "unknown argument $cmd , choose one of $setlist" if ($setlist ne '');
 }
 
 sub Navimow_Polltimer($;$) 
 {
 	my ($hash, $interval) = @_;
+	my $name = $hash->{NAME};
 	RemoveInternalTimer($hash, 'Navimow_Request');
 	$interval = $hash->{INTERVAL} if !(defined($interval));
+	Log3($name, 5, "$name (Polltimer): Schedule next request in $interval seconds");
 	if (defined($interval) && ($interval>0 )) {
 		readingsSingleUpdate($hash, 'polling', 'activ', 1 );
 		InternalTimer(gettimeofday()+$interval, 'Navimow_Request', $hash, 0);
@@ -342,34 +388,62 @@ sub Navimow_Polltimer($;$)
 
 sub Navimow_Request($;$$$)
 {
-	my ($hash, $method, $path, $data) = @_;
+	my ($hashdevice, $method, $path, $data) = @_;
 	
+	## make sure that all devices are loaded first in $modules{Navimow}{defptr}
 	if (!$init_done) {
-		InternalTimer(gettimeofday()+1, 'Navimow_Request', $hash, 0);
+		InternalTimer(gettimeofday()+1, 'Navimow_Request', $hashdevice, 0);
 		return;
-	}
+	} 	
+	
+	## start UpdateRequest always as IOMASTER, because there is the tokenSet 
+	my $hash = $modules{Navimow}{defptr}{IOMASTER};
+	return 'Navimow (UpdateRequest): No IOMASTER device found! ' if (!defined($hash));
+	my $name = $hash->{NAME};
+	
 	
 	my $a_token = $hash->{helper}{ACCESS_TOKEN};
 	if (!defined($a_token)) {
 		readingsSingleUpdate($hash, 'token_status', 'no valid access-token', 1);
+		readingsSingleUpdate($hash, 'polling', 'inactiv', 1 );
 		my $r_token = $hash->{helper}{REFRESH_TOKEN};
-		return 'Navimow (Set-Cmd): No TokenSet found! ' if (!defined($r_token));
+		if (!defined($r_token)) {
+			readingsSingleUpdate($hash, 'token_status', 'no refresh-token available', 1);
+			Log3($name, 2, "$name (Request): no access-token or refresh-token available");
+			return 'Navimow (Set-Cmd): No TokenSet found! ' ;			
+		}		
 		Navimow_RefreshToken($hash);
 		return 'Navimow (Set-Cmd): Refreshing access-token ...';
 	}
-	### ?!? wofür stand hier RemoveInternalTimer ?!?
-	### RemoveInternalTimer($hash,'Navimow_Request');
 	
 	my $uuid4 = Navimow_UUID();
+	
+	## first get all mower devices once
+	if (!defined($hash->{AUTHLIST})) {
+		$hash->{AUTHLIST} = 1;
+		$method = 'GET';
+		$path = '/openapi/smarthome/authList';
+		Log3($name, 4, "$name (Request): Requesting for available devices first.");
 		
+	## second get mqtt-credentials once	
+	} elsif (!defined($hash->{MQTTCREDENTIALS}) {
+		$hash->{MQTTCREDENTIALS} = 1;
+		$method = 'GET';
+		$path = '/openapi/mqtt/userInfo/get/v2';
+		Log3($name, 4, "$name (Request): Requesting for mqtt-credentials frist.");
+	} 
+	
 	if ( !defined($method) || !defined($path) ){
 		$method = 'POST';
-		$path = '/openapi/smarthome/getVehicleStatus' ;
-	}
-	if ( $method eq 'POST' && (!defined($data) || $data eq '')) {
-		my $sn = ReadingsVal($hash->{NAME}, 'device0_id', '');
-		return "No serial number of device. First get devices!" if ($sn eq '');
-		$data = '{"devices": [{"id":"'.$sn.'"}]}';
+		$path = '/openapi/smarthome/getVehicleStatus';
+		$data = '{"devices": [';
+		foreach my $sn (sort keys %{$modules{Navimow}{defptr}}) {
+			$data .= '{"id":"'.$sn.'"},' if ($sn ne 'IOMASTER');
+		}
+		return "No serial number of devices. First define mower devices!" if ($data eq '{"devices": [');
+		$data = substr($data, 0, -1);
+		$data .= ']}';
+		Log3($name, 5, "$name (Request): request VehicleStatus for the following devices: $data");
 	} 
 	
 	HttpUtils_NonblockingGet(
@@ -388,10 +462,10 @@ sub Navimow_Request($;$$$)
 		}
 	});
 	readingsSingleUpdate($hash, 'update_response', 'request for UpdateData ..', 1 );
+	## schedule next regular polling in 6 seconds (after timeout) when only asked for sn or credentials
+	Navimow_Polltimer($hash,($method eq 'GET' )? 6: undef);
 	
-	Navimow_Polltimer($hash);
-	
-	return;	
+	return undef;	
 }
 
 sub Navimow_Get($$@)
@@ -401,85 +475,157 @@ sub Navimow_Get($$@)
 	my $cmd = shift(@a);
 	my $setlist = '';
 
-	if ( lc($cmd) eq 'refreshtoken') {
-		return Navimow_RefreshToken($hash);
+	my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+	
+	## get for IOMASTER
+	if ( defined($iomaster) && ($hash eq $iomaster)) {
+		if ( lc($cmd) eq 'refreshtoken') {
+			return Navimow_RefreshToken($hash);
 			
-	} elsif ( lc($cmd) eq 'forceupdate') {
-		return Navimow_Request($hash);
+		} elsif ( lc($cmd) eq 'devices') {
+			return Navimow_Request($hash, 'GET', '/openapi/smarthome/authList');
 	
-	} elsif ( lc($cmd) eq 'devices') {
-		return Navimow_Request($hash, 'GET', '/openapi/smarthome/authList');
+		} elsif ( lc($cmd) eq 'devicestatus') {
+			return Navimow_Request($hash);
 	
-	} elsif ( lc($cmd) eq 'devicestatus') {
-		return Navimow_Request($hash, 'POST', '/openapi/smarthome/getVehicleStatus');
+		} elsif ( lc($cmd) eq 'mqtt-credentials') {
+			return Navimow_Request($hash, 'GET', '/openapi/mqtt/userInfo/get/v2');
 	
-	} elsif ( lc($cmd) eq 'mqtt-credentials') {
-		return Navimow_Request($hash, 'GET', '/openapi/mqtt/userInfo/get/v2');
-	
+		} else {
+			$setlist='refreshToken:noArg devices:noArg devicestatus:noArg mqtt-credentials:noArg';
+		}
+		
+	## get for mow units
 	} else {
-		$setlist='forceUpdate:noArg refreshToken:noArg devices:noArg devicestatus:noArg mqtt-credentials:noArg';
-	}
-	
+		if ( lc($cmd) eq 'forceupdate') {
+			return Navimow_Request($hash);	
+		} else {
+			$setlist='devicestatus:noArg';
+		}
+	}	
 	return "unknown argument $cmd, choose one of $setlist" if ($setlist ne '');
 	return undef;
 }
 
-sub Navimow_Attr($$)
+sub Navimow_Attr($$$;$)
 {
 	my ($cmd, $name, $attrName, $attrVal) = @_;
 	my $hash = $defs{$name};
 	
-	if ( $attrName eq 'interval' ) {
-		if ( $cmd eq 'del' || $attrVal == 0) {
-			$hash->{INTERVAL} = 0;
-			Navimow_Polltimer($hash);
-		} elsif ( AttrVal($name,'allow-short-intervals',0) || $attrVal >= 60 ) {
-			$hash->{INTERVAL} = $attrVal;
-			Navimow_Polltimer($hash, 1);
-		} else { ## if interval < 60
-			return "Minimum polling interval is 60 seconds.";
-		}
-	## save jsonRawData in a reading
-	} elsif ( $attrName eq 'saveRawData' ) {
-		if (( $cmd eq 'del' ) || ( $attrVal == 0 )) {
-			CommandDeleteReading(undef,'-q '.$name.' jsonRawData.*');
-		}
-	}			
+	my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+	
+	if ( defined($iomaster) && $hash eq $iomaster ) { 
+	## handle the change of IOMASTER attributes
+		if ( $attrName eq 'interval' ) {
+			if ( $cmd eq 'del' || $attrVal == 0) {
+				$hash->{INTERVAL} = 0;
+				Navimow_Polltimer($hash);
+			} elsif ( $attrVal >= 10 ) {
+				$hash->{INTERVAL} = $attrVal;
+				Navimow_Polltimer($hash, 1);
+			} else { ## if interval < 10
+				return "Minimum polling interval is 10 seconds.";
+			}
+		## save jsonRawData in a reading
+		} elsif ( $attrName eq 'saveRawData' ) {
+			if (( $cmd eq 'del' ) || ( $attrVal == 0 )) {
+				CommandDeleteReading(undef,'-q '.$name.' jsonRawData.*');
+				CommandDeleteReading(undef,'-q '.$name.' mqtt_downlink_vehicle.*');
+			}
+		} elsif ( $attrName eq 'MQTT' ) {
+			if (( $cmd eq 'del' ) || ( $attrVal == 0 )) {
+				Navimow_MQTT_Disconnect($hash, 0);
+			} elsif ( $attrVal == 1 ) {
+				Navimow_MQTT_Connect($hash);
+			}
+		}		
+	}
 	return undef;
 }
 
 ## --> Parameter $sn kürzen ?!?
 
-sub Navimow_GetDetail($$$$)
+sub Navimow_GetDetail($$$)
 {
-	my ($hash,$data,$rdg,$sn) = @_;
+	my ($hash,$data,$rdg) = @_;
 	
-	foreach my $skey (sort keys %{$data}) {
+	## if Hash -> go deeper in the next level
+	if (ref($data) eq "HASH") {
+		foreach my $skey (sort keys %{$data}) {
+			$rdg = '.' if ($skey eq 'data'); 
+			Navimow_GetDetail($hash,$data->{$skey},($rdg eq '') ? $skey : $rdg.'_'.$skey);
+		}
 		
-		## if Hash -> go deeper in the next level
-		if (ref($data->{$skey}) eq "HASH") {
-				Navimow_GetDetail($hash,$data->{$skey},($skey eq 'data')?'.data':$skey,$sn);
-		
-		## if array -> go for all entrys		
-		} elsif (ref($data->{$skey}) eq "ARRAY"){
-			foreach my $mp (sort keys @{$data->{$skey}}) {
-			    if (ref($data->{$skey}[$mp]) eq "HASH") {
-					$sn = (defined($data->{$skey}[$mp]{id}))? $data->{$skey}[$mp]{id} : $mp;
-					Navimow_GetDetail($hash,$data->{$skey}[$mp],($skey eq 'devices')?'device'.$mp:$rdg.'_'.$skey,$sn);
-				} 
+	## if array -> go for all entrys
+	} elsif (ref($data) eq "ARRAY") {
+		foreach my $mp (sort keys @{$data}) {
+			if ((ref($data->[$mp]) eq "HASH" ) && (defined($data->[$mp]{id}))) { 
+				my $sn = $data->[$mp]{id};
+				my $defptr = $modules{Navimow}{defptr}{$sn};
+				## if not defined -> check if autocreate is set -> then define device
+				if (!defined($defptr)) {
+					my $name = $hash->{NAME};
+					Log3($name, 3, "$name (GetDetail): New device detected with serial number = $sn");
+					if (AttrVal($hash->{NAME},'autocreate',undef)) {
+						my $dev_name = $data->[$mp]{name} // '';
+						$dev_name =~ s/[^A-Za-z0-9_]/_/g;
+						$dev_name .= '_'.$sn;
+						Log3($name, 3, "$name (GetDetail): Autocreating $dev_name");
+						my $define = "$dev_name Navimow $sn";
+						if ( my $cmdret = CommandDefine(undef,$define) ) {
+							Log3($name, 1, "$name (GetDetail): An error occurred while creating device for $sn: $cmdret ");
+						} 
+						$defptr = $modules{Navimow}{defptr}{$sn};						
+					}
+				}
+				## if device now exists in FHEM, parse the data and create readings	
+				if (defined($defptr)) {
+					$defptr->{VERSION} = $Navimow_version;
+					readingsBeginUpdate($defptr);
+					Navimow_GetDetail($defptr,$data->[$mp],'');
+					readingsEndUpdate($defptr, 1);					
+				}
+			} else {
+				Navimow_GetDetail($hash,$data->[$mp],$rdg);
 			}
 			
-		## if no hash and no array -> get info
-		} else {
-			readingsBulkUpdate($hash, $rdg.'_'.$skey, $data->{$skey});			
-		}	
+		}
+	## if no hash and no array -> get info
+	} else {
+		readingsBulkUpdate($hash, $rdg, $data);
 	}
 }
 
-sub Navimow_Response 
+sub Navimow_Transformdata($$)
 {
-	my ($param, $err, $data) = @_;
+	my ($hash, $txt) = @_;
+	my $data;
+	my $name = $hash->{NAME};
+	
+	## transform json to perl object -> use JSON::XS (=fastest), otherwise use an own awesome method
+	if ($json_xs_available) {
+		$data = eval { JSON::XS->new->boolean_values("false","true")->decode($txt) };
+		if ($@) {
+			Log3($name, 2, $name.' (Transformdata): Error using JSON::XS. To use the faster JSON::XS you have to update to the latest version. Try: "sudo apt-get install -y libjson-xs-perl" in the linux shell. Currently an alternative method will be used.');
+			$json_xs_available = 0;
+		};
+	}
+	if (!$json_xs_available) {
+		$txt =~ s/"\s*:\s*true/":"true"/g; 
+		$txt =~ s/"\s*:\s*false/":"false"/g;
+		$txt =~ s/([,:\[])\s*(null)/$1"$2"/g;		
+		$txt =~ s/":/"=>/g;
+		($data) = eval $txt ;
+	}
+	return $data;	
+}
+
+
+sub Navimow_Response
+{
+	my ($param, $err, $txt) = @_;
 	my $hash = $param->{hash};
+	my $name = $hash->{NAME};
 	$hash->{VERSION} = $Navimow_version;
 
 	if ( $err || $param->{code} != 200 ) { 
@@ -488,9 +634,9 @@ sub Navimow_Response
 			$errortext .= $err ;
 		} else {
 			$errortext .= "HTTP-Status-Code=" . $param->{code} if (defined($param->{code}));
-			$errortext .= " Response: " . $data if (defined($data));
+			$errortext .= " Response: " . $txt if (defined($txt));
 		}
-		Log3 $hash, 2, $errortext;
+		Log3($name, 2, "$name (Response): $errortext");
 		readingsSingleUpdate($hash, 'update_response', $errortext , 1 );
 		if (defined($param->{code}) && $param->{code} == 401 ){
 			delete $hash->{helper}{ACCESS_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{ACCESS_TOKEN}));
@@ -498,29 +644,13 @@ sub Navimow_Response
 		return;
 	}
 	
-	readingsSingleUpdate($hash, 'jsonRawData', $data , 1 ) if (AttrVal($hash->{NAME},'saveRawData',undef));
-		
-	my $cdda;
-	
-	## transform json to perl object -> use JSON::XS (=fastest), otherwise use an own awesome method
-	if ($json_xs_available) {
-		$cdda = eval { JSON::XS->new->boolean_values("false","true")->decode($data) };
-		if ($@) {
-			Log3 $hash, 2, 'Error using JSON::XS. To use the faster JSON::XS you have to update to the latest version. Try: "sudo apt-get install -y libjson-xs-perl" in the linux shell. Currently an alternative method will be used.';
-			$json_xs_available = 0;
-		};
-	}
-	if (!$json_xs_available) {
-		$data =~ s/"\s*:\s*true/":"true"/g; 
-		$data =~ s/"\s*:\s*false/":"false"/g;
-		$data =~ s/([,:\[])\s*(null)/$1"$2"/g;		
-		$data =~ s/":/"=>/g;
-		($cdda) = eval $data ;
-	}
+	readingsSingleUpdate($hash, 'jsonRawData', $txt , 1 ) if (AttrVal($name,'saveRawData',undef));
+	Log3($name, 5, "$name (Response): $txt");	
+	my $data = Navimow_Transformdata($hash, $txt);
 	
 	readingsBeginUpdate($hash); 
-	Navimow_GetDetail($hash,$cdda,"","") if (defined($cdda) && ref($cdda) eq "HASH");
-	readingsBulkUpdate($hash, 'update_response', $json_xs_available?'JSON_XS':'EVAL');
+	Navimow_GetDetail($hash,$data,"") if (defined($data));
+	readingsBulkUpdate($hash, 'update_response', $json_xs_available?'JSON_XS':'JSON_EVAL');
 	readingsEndUpdate($hash, 1);
 }
 
@@ -534,22 +664,14 @@ sub Navimow_MQTT_Connect($)
 	my $name = $hash->{NAME};
 	
 	return 'Enable attribut MQTT=1 first' if (!AttrVal($name, 'MQTT', 0));
+		
+	my $host = ReadingsVal($name, '._data_mqttHost', '');
+	my $path = ReadingsVal($name, '._data_mqttUrl', ''); 
 	
-# my $a_token = $hash->{helper}{ACCESS_TOKEN};
-# if (!defined($a_token)) {
-# readingsSingleUpdate($hash, 'token_status', 'no valid access-token', 1);
-# my $r_token = $hash->{helper}{REFRESH_TOKEN};
-# return 'Navimow (MQTT_Connect): No TokenSet found! ' if (!defined($r_token));
-# Navimow_RefreshToken($hash);
-# return 'Navimow (MQTT_Connect): Refreshing access-token ...';
-# }
-	
-	my $host = ReadingsVal($name, '.data_mqttHost', '');
-	my $path = ReadingsVal($name, '.data_mqttUrl', ''); 
-	my $user = ReadingsVal($name, '.data_userName', '');
-	my $pwd  = ReadingsVal($name, '.data_pwdInfo', '');
-	
-	return "Get mqtt-credentials first!" if (!$host || !$path || !$user || !$pwd );
+	if (!$init_done || !$host || !$path ) {
+		InternalTimer(gettimeofday()+30, 'Navimow_MQTT_Connect', $hash, 0);
+		return;
+	} 
 	
 	if ($host =~ m,^(wss:)/*([^/:]+)$,) {
 		$host = $1.$2.":443";
@@ -560,13 +682,20 @@ sub Navimow_MQTT_Connect($)
 	$hash->{binary} = 1;
     $hash->{header}{"Sec-WebSocket-Protocol"} = "mqtt";
 	
-# $hash->{header}{"Authorization"} = "Bearer ".$a_token;
-# $hash->{header}{"requestId"} = Navimow_UUID();
+	# nicht erforderlich ?!?
+	# $hash->{header}{"Authorization"} = "Bearer ".$a_token;
+	# $hash->{header}{"requestId"} = Navimow_UUID();
+	
 	$hash->{BUF} = "";
+	 
+	
 	if (defined($hash->{FD})) {
+		readingsSingleUpdate($hash, 'mqtt_connect', 'closing device', 1);
 		DevIo_SimpleWrite($hash, "\xe0\x00", 0); ## = "DISCONNECT"
 		DevIo_CloseDev($hash);
 	}
+	readingsSingleUpdate($hash, 'mqtt_connect', 'connection request for websocket', 1);
+	Log3($name, 5, "$name (MQTT_Connect): request Websocket-connection $hash->{DeviceName}");
 	return DevIo_OpenDev($hash, 0, "Navimow_MQTT_Login", sub(){});	
 }
 
@@ -587,11 +716,15 @@ sub Navimow_LengthPlusPayload($)
 
 sub Navimow_MQTT_Login($)
 {
-	my ($hash) = @_;
+	my ($hash) = @_;	
 	my $name = $hash->{NAME};
 	
-	my $user = ReadingsVal($name, '.data_userName', '');
-	my $pwd  = ReadingsVal($name, '.data_pwdInfo', '');
+	my $user = ReadingsVal($name, '._data_userName', '');
+	my $pwd  = ReadingsVal($name, '._data_pwdInfo', '');
+	if (!$user || !$pwd) {
+		readingsSingleUpdate($hash, 'mqtt_connect', 'no user/password for mqtt', 1);
+		return 'Navimow (MQTT_Login): No username or password found! '; 
+	}
 	
 	my $clientid = "web_".$user."_".substr($hash->{helper}{secret_state},0,10);
 	my $flags = 0xc2; ## 0x02 + 0x80 + 0x40 for clean session, user, password
@@ -601,13 +734,15 @@ sub Navimow_MQTT_Login($)
         #Protokoll Version Flags   keepalive clientid   username password
 		"MQIsdp",  3,      $flags, 60,       $clientid,	$user,   $pwd 
     ));
+	readingsSingleUpdate($hash, 'mqtt_connect', 'login for mqtt connection', 1);
+	Log3($name, 5, "$name (MQTT_Login): Login as user $user and password **** (clientid=$clientid)");
 	DevIo_SimpleWrite($hash, $msg, 0);
 	Navimow_MQTT_Keepalive($hash);
 }
 
 sub Navimow_MQTT_Read($)
 {
-	my ($hash) = @_;
+	my ($hash) = @_;	
 	my $name = $hash->{NAME};
 	my $buf = DevIo_SimpleRead($hash);
 	
@@ -644,25 +779,27 @@ sub Navimow_MQTT_Read($)
 		## Byte 1 of data: Connect Acknowledge Flags
 		## Byte 2 of data: Connect Return code
 		my $returncode = ord(substr($data,1,1));
-		my @txt = ("Connection Accepted","unacceptable protocol version","identifier rejected", 
-					"Server unavailable","bad user name or password","not authorized");
+		my @txt = ("connection accepted","unacceptable protocol version","identifier rejected", 
+					"server unavailable","bad user name or password","not authorized");
 		readingsSingleUpdate($hash, 'mqtt_connect', $txt[$returncode], 1) if ($returncode <= int(@txt));
 		if ($returncode) {
-			Log3 $name, 2, "$name MQTT-Login-Error:".($returncode<= int(@txt))? $txt[$returncode]: "unknown error";
+			Log3($name, 2, "$name (MQTT-Login-Error):".($returncode<= int(@txt))? $txt[$returncode]: "unknown error");
 			Navimow_MQTT_Disconnect($hash, 0);
 			return;
 		}
 		
 		## subscribe for topics matching serialnumber
-		my $sn = ReadingsVal($hash->{NAME}, 'device0_id', '');
-		## check for further serialnumber ?!?
-		return "No serial number of device. First get devices!" if ($sn eq '');
-		
 		my @topics = ();
-		push(@topics, "/downlink/vehicle/$sn/realtimeDate/state");
-		push(@topics, "/downlink/vehicle/$sn/realtimeDate/event");
-		push(@topics, "/downlink/vehicle/$sn/realtimeDate/attributes");
-		push(@topics, "/downlink/vehicle/$sn/realtimeDate/location");
+		foreach my $sn (sort keys %{$modules{Navimow}{defptr}}) {
+			 if ($sn ne 'IOMASTER') {
+				push(@topics, "/downlink/vehicle/$sn/realtimeDate/state");
+				push(@topics, "/downlink/vehicle/$sn/realtimeDate/event");
+				push(@topics, "/downlink/vehicle/$sn/realtimeDate/attributes");
+				push(@topics, "/downlink/vehicle/$sn/realtimeDate/location");
+			 }
+		}
+		return "No serial number of device. First get devices!" if (int(@topics) == 0);
+	
 		## \x82 = SUBSCRIBE + QoS ## n (2 Byte) = packet identifier ## n/a* = topics ## x = QoS 0
 		my $msg = "\x82". Navimow_LengthPlusPayload( pack("n", $hash->{FD}) . pack("(n/a* x)*", @topics)); 
 		DevIo_SimpleWrite($hash, $msg, 0);
@@ -681,31 +818,56 @@ sub Navimow_MQTT_Read($)
 			$msg = Encode::decode('UTF-8', $msg);
 		}
 		DevIo_SimpleWrite($hash, "\x40\x02".pack("n", $pid), 0) if($qos); # PUBACK
+		
+		
+		my ($sn) = ( $topic =~ m,^/downlink/vehicle/([^/]*)/,);
 		$topic =~ s,/,_,g;
-		readingsSingleUpdate($hash, 'mqtt'.$topic, $msg, 1);
-		## topic nach sn auswerten und auf device schreiben
-		## $msg = array
+		Log3($name, 5, "$name (MQTT_Read): $topic : $msg");
+		readingsSingleUpdate($hash, 'mqtt'.$topic, $msg, 1) if (AttrVal($hash->{NAME},'saveRawData',undef));
+		
+		## no serial number in topic?
+		return if (!defined($sn));
+		## payload to short?
+		return if (length($msg) < 5);
+		
+		my $defptr = $modules{Navimow}{defptr}{$sn};
+		if (defined($defptr)) {
+			my $json = Navimow_Transformdata($hash, $msg);
+			if (defined($json)) {
+				readingsBeginUpdate($defptr);
+				Navimow_GetDetail($defptr,$json,'');
+				readingsEndUpdate($defptr, 1);				
+			}				
+		}		
 		
 	} elsif ($type == 9) {
 		##  9 => "SUBACK" -> subscribe successful
+		Log3($name, 5, "$name (MQTT_Read): subscribe successful");
 		readingsSingleUpdate($hash, 'mqtt_subscribe', 'subscribe successful', 1);
 		
 	} elsif ($type == 13) {
 		## 13 => "PINGRESP" -> keepalive successful
-		delete($hash->{PINGREQ});
+		Log3($name, 5, "$name (MQTT_Read): PINGRESP for PINGREQ received.");
+		delete($hash->{PINGREQ});		
 		readingsSingleUpdate($hash, 'mqtt_keepalive', 'alive', 1);
 		
 	} else {
 		## unhandled packet
-		Log3 $name, 2, "$name : Unhandled packet-type no. $type data : $data";
+		Log3($name, 2, "$name (MQTT_Read): Unhandled packet-type no. $type data : $data");
 	}		
 }
 
 sub Navimow_MQTT_Disconnect($$)
 {
 	my ($hash, $reconnect) = @_;
+	
 	RemoveInternalTimer($hash, "Navimow_MQTT_Keepalive");
-	readingsSingleUpdate($hash, 'mqtt_keepalive', 'disconnected', 1);
+	readingsBeginUpdate($hash);
+	readingsBulkUpdate($hash, 'mqtt_connect', 'disconnected' );
+	readingsBulkUpdate($hash, 'mqtt_keepalive', 'disconnected' );
+	readingsBulkUpdate($hash, 'mqtt_subscribe', 'disconnected' );
+	readingsEndUpdate($hash, 1);
+		
 	if (defined($hash->{FD})) {
 		DevIo_SimpleWrite($hash, "\xe0\x00", 0); ## = "DISCONNECT"
 		DevIo_CloseDev($hash);
@@ -718,8 +880,10 @@ sub Navimow_MQTT_Disconnect($$)
 sub Navimow_MQTT_Keepalive($)
 {
 	my ($hash) = @_;
+		
 	if (defined($hash->{PINGREQ})){
-		Log3 $hash->{NAME}, 2, "$hash->{NAME}: No PINGRESP for last PINGREQ";
+		my $name = $hash->{NAME};
+		Log3($name, 2, "$name (MQTT_Keepalive): No PINGRESP for last PINGREQ");
 		delete($hash->{PINGREQ});
 		Navimow_MQTT_Disconnect($hash, 1);
 		return;
