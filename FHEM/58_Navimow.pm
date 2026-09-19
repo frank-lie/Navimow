@@ -5,6 +5,7 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.0.4 - 02.09.2026 Code cleanup
 # v0.0.3 - 31.08.2026 Commands start, stop, pause, resume, dock over Rest-API
 # v0.0.2 - 30.07.2026 Get data from json
 # v0.0.1 - 22.06.2026 Basic Oauth
@@ -25,7 +26,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.0.3 - 31.08.2026';
+my $Navimow_version = 'v0.0.4 - 02.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -48,6 +49,7 @@ sub Navimow_Set($$$$);				# handle the set commands of devices
 sub Navimow_Get($$@);				# handle the get commands of devices
 sub Navimow_Attr($$);				# handle the change of attributes
 
+sub Navimow_Polltimer($;$);			# schedule next polling interval
 sub Navimow_Request($;$$$);			# get/post a request
 sub Navimow_Response;				# receive data from the cloud
 
@@ -196,14 +198,9 @@ sub Navimow_CallbackGetToken
 	## do automatic request for available devices
 	Navimow_Request($hash, 'GET', '/openapi/smarthome/authList');
 	
-	## schedule Request if polling is activated
-	my $interval = $hash->{INTERVAL};
-	if (defined($interval) && ($interval>0 )) {
-		readingsSingleUpdate($hash, 'state', 'polling activ', 1 );
-		RemoveInternalTimer($hash,'Navimow_Request');
-		## schedule first request in 6 sec (after request of available devices)
-		InternalTimer(gettimeofday()+6, 'Navimow_Request', $hash, 0);
-	}		
+	## schedule Request in 6 secondes if polling is activated
+	Navimow_Polltimer($hash ,6);
+	
 	## do automatic refresh token 1 minute before expired
     InternalTimer(gettimeofday()+ReadingsNum($hash->{NAME},'expires_in',3600)-60,'Navimow_RefreshToken',$hash,0);
 	
@@ -248,7 +245,7 @@ sub Navimow_RefreshToken($)
 		
 	## remove all other timers do avoid double requests or invalid requests
 	RemoveInternalTimer($hash);
-	readingsSingleUpdate($hash, 'state', 'polling inactiv', 1 );
+	readingsSingleUpdate($hash, 'polling', 'inactiv', 1 );
 	
 	## check if refresh-token exists
 	my $r_token = $hash->{helper}{REFRESH_TOKEN};
@@ -272,11 +269,8 @@ sub Navimow_RefreshToken($)
 	readingsSingleUpdate($hash, 'token_status', 'request for TokenRefresh ..', 1 );
 	
 	## set new timer for update-request only for safety if refresh fails
-	my $interval = $hash->{INTERVAL};
-	if (defined($interval) && ($interval>0 )) {
-		readingsSingleUpdate($hash, 'state', 'polling activ', 1 );
-		InternalTimer(gettimeofday()+$interval, 'Navimow_Request', $hash, 0);
-	}	
+	Navimow_Polltimer($hash);
+	
 	return;
 }
 
@@ -290,6 +284,7 @@ sub Navimow_Set($$$$)
 	
 	if ( lc($cmd) eq 'authcode') {
 		return Navimow_GetToken($hash, $value);
+		
 	} elsif ( lc($cmd) eq 'command') {
 		my $sn = $a[1] // ReadingsVal($name, 'device0_id', '');
 		return "No serial number of device to command!" if ($sn eq '');
@@ -315,6 +310,20 @@ sub Navimow_Set($$$$)
 	}
 }
 
+sub Navimow_Polltimer($;$) 
+{
+	my ($hash, $interval) = @_;
+	RemoveInternalTimer($hash,'Navimow_Request');
+	$interval = $hash->{INTERVAL} if !(defined($interval));
+	if (defined($interval) && ($interval>0 )) {
+		readingsSingleUpdate($hash, 'polling', 'activ', 1 );
+		InternalTimer(gettimeofday()+$interval, 'Navimow_Request', $hash, 0);
+	} else {
+		readingsSingleUpdate($hash, 'polling', 'inactive', 1 );
+	}
+}
+
+
 sub Navimow_Request($;$$$)
 {
 	my ($hash, $method, $path, $data) = @_;
@@ -326,13 +335,14 @@ sub Navimow_Request($;$$$)
 	
 	my $a_token = $hash->{helper}{ACCESS_TOKEN};
 	if (!defined($a_token)) {
-		readingsSingleUpdate($hash, 'state', 'no access-token', 1);
+		readingsSingleUpdate($hash, 'token_status', 'no valid access-token', 1);
 		my $r_token = $hash->{helper}{REFRESH_TOKEN};
 		return 'Navimow (Set-Cmd): No TokenSet found! ' if (!defined($r_token));
 		Navimow_RefreshToken($hash);
 		return 'Navimow (Set-Cmd): Refreshing access-token ...';
 	}
-	RemoveInternalTimer($hash,'Navimow_Request');
+	### ?!? wofür stand hier RemoveInternalTimer ?!?
+	### RemoveInternalTimer($hash,'Navimow_Request');
 	
 	my $uuid4 = Navimow_UUID();
 		
@@ -340,14 +350,11 @@ sub Navimow_Request($;$$$)
 		$method = 'POST';
 		$path = '/openapi/smarthome/getVehicleStatus' ;
 	}
-	my $body = "";
 	if ( $method eq 'POST' && (!defined($data) || $data eq '')) {
 		my $sn = ReadingsVal($hash->{NAME}, 'device0_id', '');
 		return "No serial number of device. First get devices!" if ($sn eq '');
-		$body = '{"devices": [{"id":"'.$sn.'"}]}';
-	} else {
-		$body=$data;
-	}
+		$data = '{"devices": [{"id":"'.$sn.'"}]}';
+	} 
 	
 	HttpUtils_NonblockingGet(
 	{ 	
@@ -356,7 +363,7 @@ sub Navimow_Request($;$$$)
 		hash => $hash,
 		url => $navimow_cloud_url.$path, 
 		timeout => 5, 
-		data => $body,
+		data => $data,
 		header =>		
 		{
 			'Authorization' => 'Bearer '.$a_token,
@@ -366,13 +373,8 @@ sub Navimow_Request($;$$$)
 	});
 	readingsSingleUpdate($hash, 'update_response', 'request for UpdateData ..', 1 );
 	
-	my $interval = $hash->{INTERVAL};
-	if (defined($interval) && ($interval>0 )) {
-		readingsSingleUpdate($hash, 'state', 'polling activ', 1 );
-		InternalTimer(gettimeofday()+$interval, 'Navimow_Request', $hash, 0);
-	} else {
-		readingsSingleUpdate($hash, 'state', 'polling inactive', 1 );
-	}
+	Navimow_Polltimer($hash);
+	
 	return;	
 }
 
@@ -414,12 +416,10 @@ sub Navimow_Attr($$)
 	if ( $attrName eq 'interval' ) {
 		if ( $cmd eq 'del' || $attrVal == 0) {
 			$hash->{INTERVAL} = 0;
-			RemoveInternalTimer($hash,'Navimow_Request');
-			readingsSingleUpdate($hash, 'state', 'polling inactive', 1 );
+			Navimow_Polltimer($hash);
 		} elsif ( AttrVal($name,'allow-short-intervals',0) || $attrVal >= 60 ) {
 			$hash->{INTERVAL} = $attrVal;
-			RemoveInternalTimer($hash,'Navimow_Request');
-			InternalTimer(gettimeofday()+1, 'Navimow_Request', $hash, 0);
+			Navimow_Polltimer($hash, 1);
 		} else { ## if interval < 60
 			return "Minimum polling interval is 60 seconds.";
 		}
@@ -482,10 +482,8 @@ sub Navimow_Response
 		return;
 	}
 	
-	if (AttrVal($hash->{NAME},'saveRawData',undef)) {
-		readingsSingleUpdate($hash, 'jsonRawData', $data , 1 );
-	}
-	
+	readingsSingleUpdate($hash, 'jsonRawData', $data , 1 ) if (AttrVal($hash->{NAME},'saveRawData',undef));
+		
 	my $cdda;
 	
 	## transform json to perl object -> use JSON::XS (=fastest), otherwise use an own awesome method
