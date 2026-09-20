@@ -5,6 +5,7 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.2.6 - 20.09.2026 Bearer&UUID in MQTT-Connect, fix in GetDetail -> release for beta-testing
 # v0.2.5 - 20.09.2026 fix for reading 'vehicleState' (HTTP=string <> MQTT=integer)
 # v0.2.4 - 19.09.2026 set-cmd for mower device add noArg
 # v0.2.3 - 19.09.2026 fix error when deleting iomaster, fix error on attrVal to start mqtt connect
@@ -34,7 +35,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.2.5 - 20.09.2026';
+my $Navimow_version = 'v0.2.6 - 20.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -524,7 +525,7 @@ sub Navimow_Attr($$$;$)
 		if ( $attrName eq 'interval' ) {
 			if ( $cmd eq 'del' || $attrVal == 0) {
 				$hash->{INTERVAL} = 0;
-				Navimow_Polltimer($hash);
+				Navimow_Polltimer($hash, 0);
 			} elsif ( $attrVal >= 60 ) {
 				$hash->{INTERVAL} = $attrVal;
 				Navimow_Polltimer($hash, 1);
@@ -558,8 +559,9 @@ sub Navimow_GetDetail($$$)
 	## if Hash -> go deeper in the next level
 	if (ref($data) eq "HASH") {
 		foreach my $skey (sort keys %{$data}) {
-			my $srdg = ($rdg eq '') ? $skey : $rdg.'_'.$skey;
+			my $srdg = ($rdg eq '' ) ? $skey : $rdg.'_'.$skey;
 			$srdg = '._data' if ($skey eq 'data');
+			$srdg = '' if ($skey eq 'payload');
 			Navimow_GetDetail($hash,$data->{$skey},$srdg);
 		}
 		
@@ -679,7 +681,7 @@ sub Navimow_MQTT_Connect($)
 	my $path = ReadingsVal($name, '._data_mqttUrl', ''); 
 	
 	readingsSingleUpdate($hash, 'mqtt_connect', 'no mqtt-credentials', 1) if (!$host || !$path );
-	
+			
 	if (!$init_done || !$host || !$path ) {
 		InternalTimer(gettimeofday()+30, 'Navimow_MQTT_Connect', $hash, 0);
 		return;
@@ -693,13 +695,13 @@ sub Navimow_MQTT_Connect($)
 	$hash->{DeviceName} = $host.$path; 
 	$hash->{binary} = 1;
     $hash->{header}{"Sec-WebSocket-Protocol"} = "mqtt";
+	$hash->{header}{"requestId"} = Navimow_UUID();
+	## ggf. nochmal prüfen, ob ACCESS_TOKEN hier benötigt wird !
+	if (defined($hash->{helper}{ACCESS_TOKEN})) {
+		$hash->{header}{"Authorization"} = "Bearer ".$hash->{helper}{ACCESS_TOKEN};
+	};
 	
-	# nicht erforderlich ?!?
-	# $hash->{header}{"Authorization"} = "Bearer ".$a_token;
-	# $hash->{header}{"requestId"} = Navimow_UUID();
-	
-	$hash->{BUF} = "";
-	 
+	$hash->{BUF} = "";	 
 	
 	if (defined($hash->{FD})) {
 		readingsSingleUpdate($hash, 'mqtt_connect', 'closing device', 1);
