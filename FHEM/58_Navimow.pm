@@ -5,6 +5,7 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.2.5 - 20.09.2026 fix for reading 'vehicleState' (HTTP=string <> MQTT=integer)
 # v0.2.4 - 19.09.2026 set-cmd for mower device add noArg
 # v0.2.3 - 19.09.2026 fix error when deleting iomaster, fix error on attrVal to start mqtt connect
 # v0.2.2 - 18.09.2026 documentation
@@ -33,7 +34,7 @@ use vars qw(%FW_webArgs);
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.2.4 - 19.09.2026';
+my $Navimow_version = 'v0.2.5 - 20.09.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -557,8 +558,9 @@ sub Navimow_GetDetail($$$)
 	## if Hash -> go deeper in the next level
 	if (ref($data) eq "HASH") {
 		foreach my $skey (sort keys %{$data}) {
-			$rdg = '.' if ($skey eq 'data'); 
-			Navimow_GetDetail($hash,$data->{$skey},($rdg eq '') ? $skey : $rdg.'_'.$skey);
+			my $srdg = ($rdg eq '') ? $skey : $rdg.'_'.$skey;
+			$srdg = '._data' if ($skey eq 'data');
+			Navimow_GetDetail($hash,$data->{$skey},$srdg);
 		}
 		
 	## if array -> go for all entrys
@@ -597,6 +599,9 @@ sub Navimow_GetDetail($$$)
 		}
 	## if no hash and no array -> get info
 	} else {
+		## fix vehicleState HTTP=string <> MQTT=integer
+## toDo reverse-engineering of integer vehicleState to string
+		$rdg.= '_Num' if ($rdg eq 'vehicleState' && $data =~ m/^\d+$/);
 		readingsBulkUpdate($hash, $rdg, $data);
 	}
 }
