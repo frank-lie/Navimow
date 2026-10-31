@@ -1,3 +1,4 @@
 58_Navimow: - HTTP-Zugriff mit REST-API, MQTT Integration
+            - mit Live-Routen-Karten-Zeichnung
             - ausführlicher Changelog im Modul 
               (https://github.com/frank-lie/Navimow/blob/main/FHEM/58_Navimow.pm)
