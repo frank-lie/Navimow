@@ -1,6 +1,6 @@
 # Navimow Cloud Support für FHEM (58_Navimow.pm)
 
-Es handelt sich um ein Modul für FHEM, um Navimow Mähroboter von Segway über die Navimow-Cloud in FHEM zu integrieren. Die Schnittstelle ist offiziell von Navimow unter https://github.com/segwaynavimow/navimow-sdk veröffentlicht. Unterstützt werden sowohl die Abfragen über die REST API (HTTP-Requests) als auch die MQTT-basierte Anbindung für Echtzeitinformationen.
+Es handelt sich um ein Modul für FHEM, um Navimow Mähroboter von Segway über die Navimow-Cloud in FHEM zu integrieren. Die Schnittstelle ist offiziell von Navimow unter https://github.com/segwaynavimow/navimow-sdk veröffentlicht. Unterstützt werden sowohl die Abfragen über die REST API (HTTP-Requests) als auch die MQTT-basierte Anbindung für Echtzeitinformationen. Ferner ist das Modul in der Lage, die zurückgelegten Strecken/Routen des Mähroboters als SVG-Plot darzustellen.
 
 ## Vorbereitung
 
@@ -29,24 +29,23 @@ Die Navimow-App muss eingerichtet und die Mähroboter mit dieser App bzw. diesem
    ```
    define Navimow_Bridge Navimow [<CLIENT_ID> <CLIENT_SECRET> <REDIRECT_URI>]
    ```
-   CLIENT_ID, CLIENT_SECRET, REDIRECT_URI brauchen nicht angegeben werden. In diesem Fall werden Standardwerte benutzt, die ebenfalls bei der Anbindung an Home-Assistant Anwendung finden (vgl. auch offizielle Seite von Navimow for Home Assistant https://github.com/segwaynavimow/NavimowHA).
+   CLIENT_ID, CLIENT_SECRET, REDIRECT_URI brauchen nicht angegeben werden. In diesem Fall werden Standardwerte für CLIENT_ID und CLIENT_SECRET benutzt, die ebenfalls bei der Anbindung an Home-Assistant Anwendung finden (vgl. auch offizielle Seite von Navimow for Home Assistant https://github.com/segwaynavimow/NavimowHA). Die REDIRECT_URI wird automatisch aus den individuellen Parametern durch FHEM geneniert.
 
-4. Sobald das Master-Device erstellt worden ist, kann der AUTHORIZATION_LINK (zu finden als INTERNAL im Master-Device) aufgerufen werden, um den Autorisierungsprozess zu starten. Ihr werdet auf die Seite von Navimow geleitet, müsst euch dort einloggen und das Captcha lösen. Anschließend werdet ihr auf die REDIRECT_URI weitergeleitet, um den einmaligen Autorisierungscode zu bekommen.
+4. Sobald das Master-Device erstellt worden ist, kann der AUTHORIZATION_LINK (zu finden als INTERNAL im Master-Device) aufgerufen werden, um den Autorisierungsprozess zu starten. Ihr werdet auf die Seite von Navimow geleitet, müsst euch dort einloggen und das Captcha lösen. Anschließend wird automatisch die REDIRECT_URI aufgerufen und der einmalig erforderliche Autorisierungscode an FHEM übergeben. Mit dem Setzen des Autorisierungscodes bekommt FHEM die erforderlichen Token für den Zugriff auf die Navimow-Cloud übermittelt. Ihr erkennt an dem Reading "token_status" im Master-Device ob alles erfolgreich war.
+   
+5.  Die Einrichtung des Master-Devices ist damit abgeschlossen. Die Mähroboter werden standardmäßig beim Abruf der Daten aus der Cloud als Device in FHEM angelegt. Im Anschluss wird automatisch eine MQTT-Verbindung zum Navimow-Server hergestellt, damit die Real-Time-Daten per MQTT empfangen werden können.
 
-5. Wenn ihr eine individuelle REDIRECT_URI für FHEM konfiguriert habt, wird der Autorisierungscode automatisch an FHEM übergeben. Wenn ihr die oben genannten Standardwerte verwendet habt, wird euer Browser versuchen die lokale Seite "http://localhost/callback?code=xxxxx" zu öffnen und sagen das die Verbindung fehlgeschlagen ist. Das ist nicht schlimm, denn ihr benötigt lediglich den kompletten Link der Internetseite aus dem Browser. Kopiert also den vollständigen Link "http://localhost/callback?code=xxxxx" in die Zwischenablage und gebt manuell in FHEM als set-command ein:
-   ```
-   set Navimow_Bridge AuthCode <kompletter Link der Rückgabe-URL>
-   ```
+## Probleme bei der Authorisierung (REDIRECT_URI)
 
-6. Mit dem Setzen des Autorisierungscodes bekommt FHEM die erforderlichen Token für den Zugriff auf die Navimow-Cloud übermittelt. Die Einrichtung des Master-Devices ist damit abgeschlossen. Die Mähroboter werden standardmäßig beim Abruf der Daten aus der Cloud als Device in FHEM angelegt. Im Anschluss wird automatisch eine MQTT-Verbindung zum Navimow-Server hergestellt, damit die Real-Time-Daten per MQTT empfangen werden können.
+Die automatisch generierte REDIRECT_URI ist nach folgendem Schema aufgebaut `http(s)://<IP-FHEM-Server>:<PORT>/fhem?cmd.1=set%20<Master-Device-Name>%20AuthCode%20`. Sollte die unter Punkt 4 genannte Übergabe des einmaligen Autorisierungscodes an FHEM mit der automatisch generierten REDIRECT_URI scheitern, empfiehlt es sich, dass Internal DEF des Master-Devices manuell zu bearbeiten und stattdessen die allgemeine REDIRECT_URI `http://localhost/callback` zu verwenden. Nach dem Modify des Devices muss einmal die Seite des Master-Device neu geladen werden, damit der AUTHORIZATION_LINK aktualisiert wird.
 
-## Hinweise für die Benutzung einer individuellen REDIRECT_URI
+Wenn ihr den Autorisierungsprozess nun durch Klick auf den AUTHORIZATION_LINK (zu finden als INTERNAL im Master-Device) gestartet habt, euch auf der Seite von Navimow eingeloggt und das Captcha gelöst habt, wird euer Browser versuchen die lokale Seite "http://localhost/callback?code=xxxxx" zu öffnen und sagen das die Verbindung fehlgeschlagen ist. Lasst das Browserfenster mit dem Fehler offen und kopiert den kompletten Link der Internetseite aus dem Browser in die Zwischenablage (z.B. `http://localhost/callback&fwcsrf=csrf_xxxxxxxxxxxx&val.1=?code=xxxxxxxxxxxx&state=xxxxxxxxxxxx`) und gebt manuell in FHEM als set-command ein:
 
-Es besteht auch die Möglichkeit, eine individuelle `REDIRECT_URI` für FHEM zu definieren. Diese muss nach folgendem Schema erstellt/definiert werden: `http(s)://<IP-FHEM-Server>:8083/fhem?cmd=set%20<Master-Device-Name>%20AuthCode%20`. Hierbei ist zu beachten, dass wenn ihr euer FHEM mit SSL benutzt, die REDIRECT_URI natürlich zwingend mit `https://` beginnen muss. IP-FHEM-Server und Master-Device-Name sind durch die entsprechende IP und Device-Namen zu ersetzen. Der Device-Name muss urlEncoded sein! Ferner ist zu beachten, dass bei Nutzung des csrfToken in FHEM (Standard ab FHEM-Version 5.8) noch ein `&fwcsrf=<dein CSRF-Token>` angehangen wird (zu ersetzen durch den jeweiligen CSRF-Token -> vgl. INTERNAL CSRFTOKEN im Device FHEMWEB). Das ganze macht natürlich nur Sinn, wenn man ein statisches CSRF-Token verwendet.
+```
+set <Name-Master-Device> AuthCode <kompletter Link der Rückgabe-URL>
+```
 
-Beispiel für eine individuelle REDIRECT_URI könnte damit sein: `https://192.168.178.100:8083/fhem?cmd=set%20Navimow%5FBridge%20AuthCode%20&fwcsrf=csrf_1234`
-
-Da der Autorisierungsprozess jedoch nur einmal absolviert werden muss, ist der Aufwand für das definieren der individuellen REDIRECT_URI recht hoch und birgt verschiedene Fallstricke. Daher würde ich jedem Einsteiger emfpfehlen, das Master-Device einfach mit `define Navimow_Bridge Navimow` zu erstellen und den Autorisierungscode manuell aus der Browserzeile in die Zwischenablage zu kopieren und mit `set Navimow_Bridge AuthCode <Zwischenablage>` an FHEM zu übergeben.
+Im Anschluss erkennt ihr am Reading "token_status" im Master-Device, ob alles erfolgreich war.
 
 ## Readings im Master-Device / Bridge
 
