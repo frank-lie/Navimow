@@ -5,6 +5,14 @@
 # This modul ist used for control of Segway Navimow.
 #
 #######################################################################################################
+# v0.3.6 - 28.10.2026 documentation of the attributes detailPlot, detailZoom, summaryPlot, summaryZoom
+# v0.3.5 - 25.10.2026 avoid double refresh-timers
+# v0.3.4 - 25.10.2026 add attr detailPlot, detailZoom, summaryPlot, summaryZoom
+# v0.3.3 - 24.10.2026 autocreate redirect-Uri for OAuth2
+# v0.3.2 - 23.10.2026 reconnect MQTT over ReadyFn
+# v0.3.1 - 21.10.2026 better draw-function, add attribut drawMap (0=none, 1=devicedetail, 2=1+summary) 
+# v0.3.0 - 30.09.2026 implement draw-function 
+# v0.2.7 - 25.09.2026 partitionIds an List
 # v0.2.6 - 20.09.2026 Bearer&UUID in MQTT-Connect, fix in GetDetail -> release for beta-testing
 # v0.2.5 - 20.09.2026 fix for reading 'vehicleState' (HTTP=string <> MQTT=integer)
 # v0.2.4 - 19.09.2026 set-cmd for mower device add noArg
@@ -30,12 +38,13 @@ use HttpUtils;
 use SetExtensions;
 
 use vars qw(%FW_webArgs);
+use vars qw(%FW_httpheader);
 
 ## try to use JSON::XS, otherwise use own decoding sub
 my $json_xs_available = 1;
 eval "use JSON::XS qw(decode_json); 1" or $json_xs_available = 0;
 
-my $Navimow_version = 'v0.2.6 - 20.09.2026';
+my $Navimow_version = 'v0.3.6 - 28.10.2026';
 
 my $navimow_oauth_url = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant";
 my $navimow_token_url = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken";
@@ -72,6 +81,11 @@ sub Navimow_MQTT_Read($);		    # read the buffer und parse
 sub Navimow_MQTT_Disconnect($$);	# disconnect and initiate a clean session
 sub Navimow_MQTT_Keepalive($);		# ping every 60 seconds to get a response = alive
 
+sub Navimow_detailFn($$$$);			# check for drawing mowing area in device details
+sub Navimow_summaryFn($$$$);		# check for drawing mowing area in summary
+
+sub Navimow_SVG($$);				# draw the map
+
 #######################################################################################################
 
 sub Navimow_Initialize($)
@@ -83,6 +97,9 @@ sub Navimow_Initialize($)
 	$hash->{GetFn}    = 'Navimow_Get';
 	$hash->{AttrFn}   = 'Navimow_Attr';
 	$hash->{ReadFn}   = 'Navimow_MQTT_Read';
+	$hash->{ReadyFn}    = "Navimow_MQTT_Connect";
+	$hash->{FW_detailFn} = "Navimow_detailFn";
+	$hash->{FW_summaryFn} = "Navimow_summaryFn";
 }
 
 sub Navimow_UUID
@@ -124,10 +141,14 @@ sub Navimow_Define($$)
 		my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
 		return 'Cannot modify master device to mow device!' if (defined($iomaster) && $hash eq $iomaster);
 		$modules{Navimow}{defptr}{$a[2]} = $hash;
-		setDevAttrList($name, '' . $readingFnAttributes);
+		setDevAttrList($name, 'detailPlot:1,0 summaryPlot:1,0 summaryZoom:0,1,2,3,4,5 detailZoom:0,1,2,3,4,5,6,7,8,9,10 ' . $readingFnAttributes);
 		if ($init_done) {
 			CommandAttr(undef, '-silent '.$name.' room Navimow_Devices') if(!defined(AttrVal($name,"room",undef)));
-			CommandAttr(undef, '-silent '.$name.' event-on-change-reading .*') if(!defined(AttrVal($name,"event-on-change-reading",undef)));			
+			CommandAttr(undef, '-silent '.$name.' event-on-change-reading .*') if(!defined(AttrVal($name,"event-on-change-reading",undef)));
+			CommandAttr(undef, '-silent '.$name.' detailPlot 1') if(!defined(AttrVal($name,"detailPlot",undef)));			
+			CommandAttr(undef, '-silent '.$name.' detailZoom 3') if(!defined(AttrVal($name,"detailZoom",undef)));
+			CommandAttr(undef, '-silent '.$name.' summaryPlot 0') if(!defined(AttrVal($name,"summaryPlot",undef)));
+			CommandAttr(undef, '-silent '.$name.' summaryZoom 0') if(!defined(AttrVal($name,"summaryZoom",undef)));
 		}
 	} else {
 		## handle define of IO-MASTER device as a bridge
@@ -139,17 +160,10 @@ sub Navimow_Define($$)
 	
 		$hash->{CLIENT_ID}     = defined($a[2]) ? $a[2] : 'homeassistant';
 		$hash->{CLIENT_SECRET} = defined($a[3]) ? $a[3] : '57056e15-722e-42be-bbaa-b0cbfb208a52';
-		$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : 'http://localhost/callback';
+		#$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : 'http://localhost/callback'; 
+		$hash->{REDIRECT_URI}  = defined($a[4]) ? $a[4] : "$FW_httpheader{Origin}$FW_ME$FW_subdir?cmd.1=set%20$name%20AuthCode%20";
 	
 		$hash->{DEF} = $hash->{CLIENT_ID}.' '.$hash->{CLIENT_SECRET}.' '.$hash->{REDIRECT_URI};
-		
-		$hash->{AUTHORIZATION_LINK} = "<html><b><a href=\"".$navimow_oauth_url.#"authorize?".
-			"&response_type=code".
-			"&client_id=".$hash->{CLIENT_ID}.
-			"&redirect_uri=".urlEncode($hash->{REDIRECT_URI}).
-			"&state=".$hash->{helper}{secret_state}.
-			"\" target=\"_blank\">Segway Navimow Login (OAuth2)</a></b> ".
-			"</html>";
 		
 		$modules{Navimow}{defptr}{IOMASTER} = $hash;
 		
@@ -204,7 +218,7 @@ sub Navimow_CallbackGetToken
 			$errortext .= "HTTP-Status-Code=" . $param->{code} if (defined($param->{code}));
 			$errortext .= " Response: " . $data if (defined($data));
 		}
-		Log3($name, 2, "$name (CallbackGetToken): $errortext");
+		Log3($name, 1, "$name (CallbackGetToken): $errortext");
 		readingsBeginUpdate($hash);
 		readingsBulkUpdate($hash, 'token_status', $errortext );
 		readingsBulkUpdate($hash, 'token_type', 'invalid' );
@@ -219,7 +233,7 @@ sub Navimow_CallbackGetToken
 	my ($t_type) = ( $data =~ m/"token.?type"\s*:\s*"([^"]+)/i );
 	
 	if (!defined($a_token) || !defined($r_token)) {
-		Log3($name, 2, "$name (CallbackGetToken): No TokenSet found");
+		Log3($name, 1, "$name (CallbackGetToken): No TokenSet found");
 		readingsBeginUpdate($hash);
 		readingsBulkUpdate($hash, 'token_status', 'failed: no TokenSet retrieved');
 		readingsBulkUpdate($hash, 'token_type', 'none');
@@ -251,20 +265,26 @@ sub Navimow_GetToken($$)
 {
 	my ($hash, $code) = @_;
 	my $name = $hash->{NAME};
-
+	
+	Log3($name, 5, "$name (GetToken): request for TokenSet .. (AuthCode = $code )");
+	
 	$code = urlDecode($code);
 	$code = $1 if ($code =~ m/code=([^&]*)/);
 	
 	if (length($code)<8) {
-		$code = $FW_webArgs{"code"} if defined($FW_webArgs{"code"});
+		if (defined($FW_webArgs{"code"})) {
+			$code = $FW_webArgs{"code"}; 
+		} else {
+			foreach my $k (sort keys %FW_webArgs) {
+				$code = $1 if ( $FW_webArgs{$k} =~ m/code=([^&]*)/ );
+			}
+			Log3($name, 5, "$name (GetToken): FW_webargs: ".join(' - ', %FW_webArgs));
+		}
 		if (length($code)<8) {
 			readingsSingleUpdate($hash, 'token_status', 'no valid AuthCode', 1 );
 			return "No valid AuthCode";
-		};
-		
+		};	
 	}	
-	
-	Log3($name, 5, "$name (GetToken): request for TokenSet .. (AuthCode = $code )");
 	
 	HttpUtils_NonblockingGet(
 	{
@@ -294,6 +314,8 @@ sub Navimow_RefreshToken($)
 	
 	## remove all other request timers do avoid double requests or invalid requests
 	RemoveInternalTimer($hash, 'Navimow_Request');
+	## avoid double refresh-timer !!
+	RemoveInternalTimer($hash, 'Navimow_RefreshToken'); 
 	readingsSingleUpdate($hash, 'polling', 'inactiv', 1 );
 	
 	## check if refresh-token exists
@@ -367,7 +389,7 @@ sub Navimow_Set($$@)
 			return "Error creating command!" if ($data eq '' );
 			readingsSingleUpdate($hash, 'set_data', $data, 1 ) if (AttrVal($name,'saveRawData',undef));
 			readingsSingleUpdate($hash, 'set_cmd', $cmd, 1 );
-			Log3($name, 5, "$name (Set_Cmd): $cmd = $data");
+			Log3($name, 4, "$name (Set_Cmd): $cmd = $data");
 			Navimow_Request($hash, 'POST', '/openapi/smarthome/sendCommands', $data);
 		} else {
 			$setlist = 'start:noArg stop:noArg pause:noArg resume:noArg dock:noArg';			
@@ -562,7 +584,90 @@ sub Navimow_GetDetail($$$)
 			my $srdg = ($rdg eq '' ) ? $skey : $rdg.'_'.$skey;
 			$srdg = '._data' if ($skey eq 'data');
 			$srdg = '' if ($skey eq 'payload');
-			Navimow_GetDetail($hash,$data->{$skey},$srdg);
+			if ($skey eq 'partitionIds' && ref($data->{$skey}) eq "ARRAY" ) {
+				readingsBulkUpdate($hash, $skey, join(',',@{$data->{$skey}}));
+			} else {
+				## check if progress of currentMowBoundary smaller than last progress
+				if ($skey eq 'currentMowBoundary' && defined($data->{'currentMowProgress'}) && defined($data->{'action'})){
+					my $z = $data->{'currentMowBoundary'};
+					my $progress = $data->{'currentMowProgress'};
+					
+## ist die currentMowBoundary in den aktuellen partitionIds ?!? --> ggf checken.
+## ist der Status docked ?!? --> ggf checken.
+					
+					if (defined($hash->{helper}) && defined($hash->{helper}{path}) && defined($hash->{helper}{path}{$z})) {
+						if (!defined($hash->{helper}{path}{$z}{edge}) 
+							|| !defined($hash->{helper}{path}{$z}{area}) 
+							|| !defined($hash->{helper}{path}{$z}{progress}) 
+							|| $progress < $hash->{helper}{path}{$z}{progress}) 
+						{
+								$hash->{helper}{path}{$z}{edge} = "";
+								$hash->{helper}{path}{$z}{area} = "";
+						}
+					}
+					$hash->{helper}{path}{$z}{progress} = $progress;	
+					$hash->{helper}{zone} = $z;
+					## only registrate 5=area; 8=edge; -1= ignore
+					$hash->{helper}{action} = 'area' if ($data->{'action'} eq '5');
+					$hash->{helper}{action} = 'edge' if ($data->{'action'} eq '8');					
+				}
+				## evaluate position data
+				if ($skey eq 'postureTheta' && defined($data->{'postureX'}) && defined($data->{'postureY'})){
+					my $x = $data->{'postureX'} * 4;
+					my $y = $data->{'postureY'} * 4;
+					$hash->{helper}{minX} = $x if (!defined($hash->{helper}{minX}) || $x < $hash->{helper}{minX});
+					$hash->{helper}{minY} = $y if (!defined($hash->{helper}{minY}) || $y < $hash->{helper}{minY});
+					$hash->{helper}{maxX} = $x if (!defined($hash->{helper}{maxX}) || $x > $hash->{helper}{maxX});
+					$hash->{helper}{maxY} = $y if (!defined($hash->{helper}{maxY}) || $y > $hash->{helper}{maxY});
+					## save position of the dock if isDocked
+					if (defined($data->{'vehicleState'}) && $data->{'vehicleState'} == 2) {
+						$hash->{helper}{DockX} = $x;
+						$hash->{helper}{DockY} = $y;
+					}
+					## is current zone and action known ?
+					if (defined($hash->{helper}) && defined($hash->{helper}{zone}) && defined($hash->{helper}{action})){
+						my $zone = $hash->{helper}{zone};
+						my $action = $hash->{helper}{action};
+						
+						## is zone already initialized ?
+						if (defined($hash->{helper}{path}) && defined($hash->{helper}{path}{$zone}) && defined($hash->{helper}{path}{$zone}{$action})){
+							
+							## is it the first position in the zone for this action ?
+							if ($hash->{helper}{path}{$zone}{$action} eq "" || !defined($hash->{helper}{lastX}) || !defined($hash->{helper}{lastY}) || !defined($hash->{helper}{lastT})) {
+								$hash->{helper}{path}{$zone}{$action} = 'M'.$x.','.$y;
+								$hash->{helper}{lastT} = $data->{'postureTheta'};
+								$hash->{helper}{lastX} = $x;
+								$hash->{helper}{lastY} = $y;
+							
+							## is position changed ?
+							} else {
+								my $deltaT = abs($hash->{helper}{lastT} - $data->{'postureTheta'});
+								$deltaT= 6.28-$deltaT if ($deltaT>3.14);
+								## change of direction of more than 11.5 degrees (~ 0.2 rad)
+								if ( $deltaT > 0.2 && ( $hash->{helper}{lastX} != $x || $hash->{helper}{lastY} !=$y )) {
+									my $deltaX = $x - $hash->{helper}{lastX};
+									my $deltaY = $y - $hash->{helper}{lastY};
+									if ($deltaX == 0) {
+										$hash->{helper}{path}{$zone}{$action} .= 'v'.$deltaY;
+									} elsif ($deltaY == 0) {
+										$hash->{helper}{path}{$zone}{$action} .= 'h'.$deltaX;
+									} else {
+										$hash->{helper}{path}{$zone}{$action} .= 'L'.$x;
+										$hash->{helper}{path}{$zone}{$action} .= ',' if ($y >=0);
+										$hash->{helper}{path}{$zone}{$action} .= $y;
+										#$hash->{helper}{path}{$zone}{$action} .= 'l'.$deltaX.','.$deltaY;
+									}
+									## save current data for the next comparison
+									$hash->{helper}{lastT} = $data->{'postureTheta'};
+									$hash->{helper}{lastX} = $x;
+									$hash->{helper}{lastY} = $y;
+								}
+							}
+						}
+					}		
+				}				
+				Navimow_GetDetail($hash,$data->{$skey},$srdg);
+			}
 		}
 		
 	## if array -> go for all entrys
@@ -596,13 +701,12 @@ sub Navimow_GetDetail($$$)
 				}
 			} else {
 				Navimow_GetDetail($hash,$data->[$mp],$rdg);
-			}
-			
+			}		
 		}
 	## if no hash and no array -> get info
 	} else {
 		## fix vehicleState HTTP=string <> MQTT=integer
-## toDo reverse-engineering of integer vehicleState to string
+		## toDo reverse-engineering of integer vehicleState to string
 		$rdg.= '_Num' if ($rdg eq 'vehicleState' && $data =~ m/^\d+$/);
 		readingsBulkUpdate($hash, $rdg, $data);
 	}
@@ -648,7 +752,7 @@ sub Navimow_Response
 			$errortext .= "HTTP-Status-Code=" . $param->{code} if (defined($param->{code}));
 			$errortext .= " Response: " . $txt if (defined($txt));
 		}
-		Log3($name, 2, "$name (Response): $errortext");
+		Log3($name, 1, "$name (Response): $errortext");
 		readingsSingleUpdate($hash, 'update_response', $errortext , 1 );
 		if (defined($param->{code}) && $param->{code} == 401 ){
 			delete $hash->{helper}{ACCESS_TOKEN} if (defined($hash->{helper}) && defined($hash->{helper}{ACCESS_TOKEN}));
@@ -693,6 +797,8 @@ sub Navimow_MQTT_Connect($)
 		return 'Error in mqtt_host';
 	}
 	$hash->{DeviceName} = $host.$path; 
+	$hash->{devioLoglevel} = 4;
+	$hash->{nextOpenDelay} = 60;
 	$hash->{binary} = 1;
     $hash->{header}{"Sec-WebSocket-Protocol"} = "mqtt";
 	$hash->{header}{"requestId"} = Navimow_UUID();
@@ -709,7 +815,7 @@ sub Navimow_MQTT_Connect($)
 		DevIo_CloseDev($hash);
 	}
 	readingsSingleUpdate($hash, 'mqtt_connect', 'connection request for websocket', 1);
-	Log3($name, 5, "$name (MQTT_Connect): request Websocket-connection $hash->{DeviceName}");
+	Log3($name, 4, "$name (MQTT_Connect): request Websocket-connection $hash->{DeviceName}");
 	return DevIo_OpenDev($hash, 0, "Navimow_MQTT_Login", sub(){});	
 }
 
@@ -746,10 +852,10 @@ sub Navimow_MQTT_Login($)
 	my $msg = "\x10" . Navimow_LengthPlusPayload(pack(
         "x C/a* C C n n/a* n/a* n/a*",
         #Protokoll Version Flags   keepalive clientid   username password
-		"MQIsdp",  3,      $flags, 60,       $clientid,	$user,   $pwd 
+		"MQIsdp",  3,      $flags, 600,       $clientid,	$user,   $pwd 
     ));
 	readingsSingleUpdate($hash, 'mqtt_connect', 'login for mqtt connection', 1);
-	Log3($name, 5, "$name (MQTT_Login): Login as user $user and password **** (clientid=$clientid)");
+	Log3($name, 4, "$name (MQTT_Login): Login as user $user and password **** (clientid=$clientid)");
 	DevIo_SimpleWrite($hash, $msg, 0);
 	Navimow_MQTT_Keepalive($hash);
 }
@@ -856,7 +962,7 @@ sub Navimow_MQTT_Read($)
 		
 	} elsif ($type == 9) {
 		##  9 => "SUBACK" -> subscribe successful
-		Log3($name, 5, "$name (MQTT_Read): subscribe successful");
+		Log3($name, 4, "$name (MQTT_Read): subscribe successful");
 		readingsSingleUpdate($hash, 'mqtt_subscribe', 'subscribe successful', 1);
 		
 	} elsif ($type == 13) {
@@ -908,6 +1014,99 @@ sub Navimow_MQTT_Keepalive($)
 	InternalTimer(gettimeofday()+60, "Navimow_MQTT_Keepalive", $hash, 0);	
 }
 
+sub Navimow_detailFn($$$$)
+{
+	my ($FW_wname, $name, $room, $pageHash) = @_;
+	my $hash = $defs{$name};
+	my $iomaster = $modules{Navimow}{defptr}{IOMASTER};
+	if (defined($iomaster) && $hash eq $iomaster) {
+		$hash->{AUTHORIZATION_LINK} = "<html><b><a href=\"".$navimow_oauth_url.
+			"&response_type=code&client_id=".$hash->{CLIENT_ID}.
+			"&redirect_uri=".urlEncode($hash->{REDIRECT_URI}.$FW_CSRF.'&val.1=').
+			"&state=".$hash->{helper}{secret_state}.
+			"\" target=\"_blank\">Segway Navimow Login (OAuth2)</a></b></html>";
+	}
+	
+	if (AttrVal($name,"detailPlot",0)) {
+		my $zoom = AttrVal($name,"detailZoom",3);
+		return Navimow_SVG($name, $zoom); 
+	}
+	return undef;
+}
+
+sub Navimow_summaryFn($$$$) 
+{
+	my ($FW_wname, $name, $room, $pageHash) = @_;
+	if (AttrVal($name,"summaryPlot",0)) {
+		my $zoom = AttrVal($name,"summaryZoom",0);
+		return Navimow_SVG($name, $zoom); 
+	}
+	return undef;
+}
+
+
+sub Navimow_SVG($$) 
+{
+	my ($name, $zoom) = @_;	
+	my $hash = $defs{$name};
+	
+	my $widthzoom = 576;
+	my $heightzoom = 35;
+	
+	my $ret = "\n";
+	my $pathes = "";
+	
+	if ( $zoom && defined ($hash->{helper}{minX}) && defined($hash->{helper}{minY}) && defined($hash->{helper}{maxX}) && defined($hash->{helper}{maxY}) && defined($hash->{helper}{path})) {
+		my $transx = ($hash->{helper}{minX} *-1)+5 ;
+		my $transy = ($hash->{helper}{maxY} *-1)-int(30/$zoom) ;
+		$widthzoom = (int($hash->{helper}{maxX}) - int($hash->{helper}{minX})) * $zoom + 10;
+		$heightzoom = (int($hash->{helper}{maxY}) - int($hash->{helper}{minY})) * $zoom + 35;
+		$widthzoom = 576 if ($widthzoom < 576);
+		
+		$pathes = "<g transform=\"scale($zoom -$zoom) translate($transx $transy)\">"."\n";
+		foreach my $zone (sort keys %{$hash->{helper}{path}}) {
+			if (defined($hash->{helper}{path}{$zone}{edge}) && $hash->{helper}{path}{$zone}{edge} ne ""){
+				$pathes.= '<path d="'.$hash->{helper}{path}{$zone}{edge}.'" stroke="red" stroke-width="0.4" />'."\n";
+			}
+			if (defined($hash->{helper}{path}{$zone}{area}) && $hash->{helper}{path}{$zone}{area} ne ""){
+				$pathes.= '<path d="'.$hash->{helper}{path}{$zone}{area}.'" stroke="black" stroke-width="0.2" />'."\n";
+			}
+		}
+		$pathes.= '<rect x="'.($hash->{helper}{DockX}-3).'" y="'.($hash->{helper}{DockY}-3).'" width="6" height="6" fill="grey" />'."\n" if (defined ($hash->{helper}{DockX}) && defined($hash->{helper}{DockY}));
+				
+		my $posX = ReadingsNum( $name, 'postureX', undef);
+		my $posY = ReadingsNum( $name, 'postureY', undef);
+		$pathes.= '<circle cx="'.($posX*4).'" cy="'.($posY*4).'" r="2" fill="orange" />'."\n" if (defined($posX) && defined($posY));
+		$pathes.= '</g>'."\n";		
+	}
+		
+	$ret.= "<svg xmlns=\"http://www.w3.org/2000/svg\" style='width:${widthzoom}px; height:${heightzoom}px;' fill=\"none\">"."\n";
+	$ret.= '<defs><style>#navimow:hover{fill:blue}#navimow:active{fill:green}</style></defs>'."\n";
+	$ret.= '<rect x="2" y="2" width="'.($widthzoom-4).'" height="'.($heightzoom-4).'" rx="4" stroke="black" stroke-width="1" />'."\n";		
+	$ret.= '<g fill="grey">'."\n";
+	$ret.= '<rect x="5" y="5" width="180" height="25" rx="4" />'."\n";
+	$ret.= '<rect x="188" y="5" width="80" height="25" rx="4" />'."\n";
+	$ret.= '<rect x="271" y="5" width="160" height="25" rx="4" />'."\n";
+	$ret.= "<a href=\"$FW_ME$FW_subdir?cmd=set%20$name%20start$FW_CSRF\">".'<rect id="navimow" x="434" y="5" width="25" height="25" rx="4" /></a>';
+	$ret.= "<a href=\"$FW_ME$FW_subdir?cmd=set%20$name%20pause$FW_CSRF\">". '<use href="#navimow" x="28" /></a>'."\n"; 
+	$ret.= "<a href=\"$FW_ME$FW_subdir?cmd=set%20$name%20resume$FW_CSRF\">".'<use href="#navimow" x="56"/></a>'."\n";	
+	$ret.= "<a href=\"$FW_ME$FW_subdir?cmd=set%20$name%20stop$FW_CSRF\">".  '<use href="#navimow" x="84"/></a>'."\n"; 
+	$ret.= "<a href=\"$FW_ME$FW_subdir?cmd=set%20$name%20dock$FW_CSRF\">".  '<use href="#navimow" x="112"/></a>'."\n"; 
+	$ret.= '</g>'."\n";
+	$ret.= '<path d="M440 10v15l13-7z M468 10v15h4v-15z M477 10v15h4v-15z M495 10v15h4v-15z M503 10v15l8-7z M523 10v15h15v-15z M555 17v8h8v-8h4l-8-7l-8 7h16z" stroke-width="1.5" stroke="orange" fill="blue" style="pointer-events: none;" />'."\n";
+		
+	$ret.= '<g style="font:italic 16px sans-serif; fill:orange">'."\n";
+	$ret.= '<text x="10" y="22" >'.substr(ReadingsVal($name, 'name', 'Navimow'),0,20).'</text>'."\n";
+	my $bat = ReadingsVal($name, 'battery', '--');
+	$bat = ReadingsVal($name, 'capacityRemaining_rawValue', '--') if (ReadingsAge($name, 'capacityRemaining_rawValue', 86400)<ReadingsAge($name, 'battery', 86400));
+	$ret.= '<text x="193" y="22" >Akku: '.$bat.'</text>'."\n";
+	my $stat = ReadingsVal($name, 'state', '--');
+	$stat = ReadingsVal($name, 'vehicleState', '--') if (ReadingsAge($name, 'vehicleState', 86400)<ReadingsAge($name, 'state', 86400));
+	$ret.= '<text x="276" y="22" >Status: '.$stat.'</text>'."\n";
+	$ret.= '</g>'."\n";
+	
+	return $ret.$pathes.'</svg>'."\n";
+}
 
 1;
 
@@ -1088,6 +1287,43 @@ sub Navimow_MQTT_Keepalive($)
         format (JSON string) in the `saveRawData` reading. This is 
         primarily intended for debugging or troubleshooting purposes. 
         This attribute is available only on the master device.
+        <br>
+      </li>
+    </ul>
+  </ul>
+  <br>
+  <b>Attributes</b> (nur f&uuml;r die Mower-Device)<br>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-attr-detailPlot"></a>
+      <li><b>detailPlot</b> [ 1 | 0 ]<br>
+        When set to 1 (default), the current status and control commands for 
+        the Mover device are displayed in the detail view as an SVG plot element. 
+        Furthermore the edges and areas already traversed are shown graphically 
+        below this when the attribut detailZoom is greater than 0.
+        <br>
+      </li>
+      <a id="Navimow-attr-detailZoom"></a>
+      <li><b>detailZoom</b> [ 0 - 10 ]<br>
+        Defines the zoom factor for the drawn map (a plot of the traversed edges 
+        and areas) in the detail view of the Mover device. If the value 0 is used, 
+        no map plot is displayed (default = 3).
+        <br>
+      </li>
+	  <a id="Navimow-attr-summaryPlot"></a>
+      <li><b>summaryPlot</b> [ 1 | 0 ]<br>
+        When set to 1 (default = 0), the current status and control commands are 
+        displayed as an SVG plot element in the status line within the device 
+        overview (room view). Furthermore the edges and areas already covered 
+        are shown graphically when the attribut summaryZoom is greater than 0.
+        <br>
+      </li>
+	  <a id="Navimow-attr-summaryZoom"></a>
+      <li><b>summaryZoom</b> [ 0 - 5 ]<br>
+        Defines the zoom factor for the drawn map (a plot of the traversed edges 
+        and areas) within the device overview (room view). If the value 0 (default) 
+        is used, no map plot is displayed in the device overview.
         <br>
       </li>
     </ul>
@@ -1281,6 +1517,45 @@ sub Navimow_MQTT_Keepalive($)
     </ul>
   </ul>
   <br>
+  <b>Attributes</b> (nur f&uuml;r die Mower-Device)<br>
+  <ul>
+    <ul>
+      <br>
+      <a id="Navimow-attr-detailPlot"></a>
+      <li><b>detailPlot</b> [ 1 | 0 ]<br>
+        Bei Einstellung auf 1 (Standard) wird in der Detailansicht des
+        Mover-Devices der aktuelle Status sowie die Steuerbefehle als SVG-Plot 
+        Element dargestellt. Ferner werden die bereits abgefahrenen R&auml;nder 
+        und Fl&auml;chen darunter grafisch dargestellt, soweit das Attribut  
+        detailZoom gr&ouml;sser als 0 ist.
+        <br>
+      </li>
+      <a id="Navimow-attr-detailZoom"></a>
+      <li><b>detailZoom</b> [ 0 - 10 ]<br>
+        Definiert den Zoomfaktor der gezeichneten Karte (Plot der abgefahrenen 
+        R&auml;nder und Fl&auml;chen) in der Detailansicht des Mover-Devices.
+        Falls der Wert 0 verwendet wird, wird kein Plot der Karte dargestellt
+        (Standard = 3).
+        <br>
+      </li>
+	  <a id="Navimow-attr-summaryPlot"></a>
+      <li><b>summaryPlot</b> [ 1 | 0 ]<br>
+        Bei Einstellung auf 1 (Standard = 0) wird in der &Uuml;bersicht der 
+		Devices (Raumansicht) der aktuelle Status sowie Steuerbefehle als SVG-Plot 
+        Element in der Statuszeile dargestellt. Ferner werden die bereits  
+        abgefahrenen R&auml;nder und Fl&auml;chen grafisch dargestellt, soweit  
+        das Attribut summaryZoom gr&ouml;sser als 0 ist.
+        <br>
+      </li>
+	  <a id="Navimow-attr-summaryZoom"></a>
+      <li><b>summaryZoom</b> [ 0 - 5 ]<br>
+        Definiert den Zoomfaktor der gezeichneten Karte (Plot der abgefahrenen 
+        R&auml;nder und Fl&auml;chen) in der &Uuml;bersicht der Devices (Raumansicht).
+        Falls der Wert 0 (Standard) verwendet wird, wird kein Plot der Karte dargestellt.
+        <br>
+      </li>
+    </ul>
+  </ul>
 </ul>
 <br>
 
